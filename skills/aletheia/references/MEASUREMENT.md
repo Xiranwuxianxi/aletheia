@@ -6,34 +6,60 @@ distinction is visible in the output, not buried in a footnote.
 
 ## What can actually be measured
 
-| Host | Token telemetry | Source |
-| --- | --- | --- |
-| Claude Code | **yes** | `~/.claude/projects/**/*.jsonl`, `message.usage` |
-| Codex | **yes** | `~/.codex/**/*.jsonl`, top-level `usage` |
-| WorkBuddy | **no** | nothing persisted; read its own UI |
+Aletheia ships adapters for twelve mainstream hosts. **Every host returns the
+same keys**, so nothing has to branch on which one lacked data — and a host we
+cannot read is reported `unavailable`, never `0`.
 
 ```bash
-python scripts/router.py telemetry
+python scripts/router.py hosts          # what is supported and what can be read
+python scripts/router.py telemetry      # real totals for every host present
+python scripts/router.py telemetry --host claude --host kimi
 ```
 
-Reads every host that persists usage and reports real totals:
+| Host | Skill dir | Telemetry | Session location | Usage block |
+| --- | --- | --- | --- | --- |
+| Claude Code | `.claude/skills` | yes | `~/.claude/projects/**/*.jsonl` | `message.usage` |
+| Codex | `.agents/skills` | yes | `~/.codex/**/*.jsonl` | `usage` |
+| Kimi Code | `.kimi/skills` | yes | `~/.kimi/sessions/**/wire.jsonl` | `message.payload.token_usage` |
+| Qwen Code | `.qwen/skills` | yes | `~/.qwen/projects/**/*.jsonl` | `usageMetadata` |
+| Gemini CLI | `.gemini/extensions` | yes | `~/.gemini/tmp/*/chats/*` | `usageMetadata` |
+| Copilot CLI | `.copilot/skills` | yes | `~/.copilot/{otel,session-state}` | `usage` / `data.usage` |
+| OpenCode | `.opencode/skills` | partial | `~/.local/share/opencode/storage/message/**` | `tokens` (SQLite not read) |
+| Droid | `.factory/skills` | yes | `~/.factory/sessions/*.json` | `usage` |
+| Kiro | `.kiro/skills` | yes | `~/.kiro/sessions/cli/*.json` | `usage` |
+| Crush | `.crush/skills` | yes | `~/.local/share/crush/projects.json` | `usage` / `totals` |
+| Aider | `.aider/skills` | if enabled | `~/.aider/**/*.jsonl` | `usage` |
+| WorkBuddy | `.workbuddy/skills` | **no** | persists nothing | — |
 
-```json
-"claude": {
-  "available": true,
-  "messages_with_usage": 29,
-  "input_tokens": 58,
-  "output_tokens": 8951,
-  "cache_read_tokens": 2377969,
-  "cache_write_tokens": 483380,
-  "billable_tokens_excluding_cache_read": 492389,
-  "provenance": "read directly from host session files"
-},
-"workbuddy": {
-  "available": false,
-  "input_tokens": "unavailable",
-  "reason": "this host does not persist token usage to disk; read it from its own UI"
-}
+### Every host names its fields differently
+
+This is the part that actually matters, and why the adapters exist:
+
+| Host | Cache-read field | Where it hides |
+| --- | --- | --- |
+| Claude Code | `cache_read_input_tokens` | inside `message.usage` |
+| Codex | `cached_tokens` | `input_token_details`, *beside* `usage` |
+| Kimi Code | `input_cache_read` | `message.payload.token_usage` |
+| Qwen / Gemini | `cachedContentTokenCount` | `usageMetadata` |
+| OpenCode | `cache` / `cacheRead` | `tokens` |
+
+An adapter that assumed the Claude layout would have reported **0 for everything
+else** — a confident, well-formatted, completely wrong number. The alias table
+maps each host onto one canonical shape:
+
+```text
+input · output · cache_read · cache_write
+```
+
+Measured on this machine:
+
+```text
+host                  ok  files  msgs           input      output    cache_read
+Claude Code           Y   2      29                58       8,951     2,377,969
+Codex                 Y   141    1                180          96            48
+Kimi Code             Y   49     3401       8,842,282   1,917,619   359,392,132
+Qwen Code             Y   4      106        2,523,460      51,844     2,356,065
+Gemini CLI            -   0      -                              unavailable
 ```
 
 A host with no data reads `unavailable` — **never `0`**. A zero would be a claim,
@@ -44,6 +70,13 @@ and it would be wrong.
 Cache reads cost a fraction of fresh input. Blending them into one "total"
 would misrepresent cost by an order of magnitude. The report gives raw counts and
 leaves pricing to you.
+
+### SQLite-backed hosts
+
+OpenCode and Goose keep usage in SQLite. Aletheia is stdlib-only and does not
+ship a database driver, so their adapters read the JSON message store when one
+exists and report `unavailable` otherwise. This is a stated limit, not a silent
+zero.
 
 ## Before and after a task
 
@@ -163,6 +196,39 @@ macOS / Linux cron:
 Run it **read-only** first (`--quiet`, no `--fix`) for a few days. Automatic
 repair of third-party skill files should be something you watch happen before
 you let it run unattended.
+
+## Supporting a host that is not registered yet
+
+Adding one is a data change, not a code change. Append an entry to
+`TELEMETRY_HOSTS` in `scripts/router.py`:
+
+```python
+"yourhost": {
+    "label": "Your Host",
+    "sessions": "~/.yourhost/sessions",      # None = no telemetry
+    "globs": ("**/*.jsonl",),                  # several layouts are fine
+    "usage_paths": (("usage",), ("message", "usage")),
+    "aliases": {                               # map its names onto ours
+        "input": ("prompt_tokens", "input_tokens"),
+        "output": ("completion_tokens", "output_tokens"),
+        "cache_read": ("cached_tokens",),
+        "cache_write": (),
+    },
+    "skills": ("~/.yourhost/skills",),         # so the butler can see them
+    "native_skill_dir": ".yourhost/skills",
+},
+```
+
+Then verify against real data before trusting it:
+
+```bash
+python scripts/router.py telemetry --host yourhost
+```
+
+Two tests guard the registry automatically: every alias must be reachable by the
+line prefilter (or its data would be dropped before parsing), and every host must
+return the identical key set. Run `python -m unittest discover -s tests` after
+adding one.
 
 ## The honesty rules, collected
 

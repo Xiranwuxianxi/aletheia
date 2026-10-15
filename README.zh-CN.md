@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
-[![Version](https://img.shields.io/badge/version-1.5.0-888780?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.6.0-888780?style=flat-square)](CHANGELOG.md)
 
 [English](README.md) · **简体中文**
 
@@ -198,34 +198,49 @@ python skills/aletheia/scripts/router.py progress \
 ## 真实消耗：只报测得到的数
 
 ```bash
-python skills/aletheia/scripts/router.py telemetry
-python skills/aletheia/scripts/router.py measure "导出 Q3 财报" --only excel-xlsx --phase before
+python skills/aletheia/scripts/router.py hosts        # 支持哪些宿主
+python skills/aletheia/scripts/router.py telemetry    # 各宿主真实用量
 python skills/aletheia/scripts/router.py report --out report.html
 ```
 
-真实 token 用量直接从**持久化了遥测的宿主**读取：
+已注册 **12 个主流宿主**。**每个宿主返回相同的字段结构**，读不到的一律标
+`unavailable`，**绝不用 0 冒充**。
 
-| 宿主 | 遥测 | 来源 |
-| --- | --- | --- |
-| Claude Code | **实测** | `~/.claude/projects/**/*.jsonl` |
-| Codex | **实测** | `~/.codex/**/*.jsonl` |
-| WorkBuddy | `unavailable` | 未持久化，请读它自己的 UI |
+| 宿主 | 遥测 | 宿主 | 遥测 |
+| --- | --- | --- | --- |
+| Claude Code | 实测 | OpenCode | 部分（JSON 存储） |
+| Codex | 实测 | Droid（Factory） | 实测 |
+| Kimi Code | 实测 | Kiro | 实测 |
+| Qwen Code | 实测 | Crush | 实测 |
+| Gemini CLI | 实测 | Aider | 需开启 |
+| Copilot CLI | 实测 | WorkBuddy | 未持久化 |
 
-没有遥测的主机显示 **`unavailable`，绝不是 `0`** —— 0 是一个断言，而且会是错的。
-cache read 单独列出而不并入总数，因为它便宜得多。
+**每家的字段名都不一样**——Claude 是 `cache_read_input_tokens`，Codex 把
+`cached_tokens` 藏在 `input_token_details`，Kimi 是 `message.payload.token_usage`
+下的 `input_cache_read`，Qwen/Gemini 用 `promptTokenCount`。适配器靠别名表统一
+到一种结构；认不出的格式报 `unavailable`，而不是给一个自信的零。
 
-**明确拒绝估算的项**：
+本机实测：
 
-| 说法 | 为什么不给 |
-| --- | --- |
-| 避免选错 skill 重做省下的 token | 需要同一任务真实 A/B 对照 |
-| 用与不用的实际用量差 | 该宿主没有遥测 |
-| 省钱金额 | 需要单价和实测可计费 token |
+```text
+host                  ok  files  msgs           input      output    cache_read
+Claude Code           Y   2      29                58       8,951     2,377,969
+Codex                 Y   141    1                180          96            48
+Kimi Code             Y   49     3401       8,842,282   1,917,619   359,392,132
+Qwen Code             Y   4      106        2,523,460      51,844     2,356,065
+Gemini CLI            -   0      -                              unavailable
+```
 
-`--actual-tokens` 只能填**你从宿主读到的**数字，工具不会自己推算。
+cache read 单独统计而不并入总计——它便宜得多，混在一起成本会错一个数量级。
 
-记录只存在本机 `~/.aletheia/ledger.jsonl`。`report` 导出**自包含** HTML —— 无 CDN、无字体、无网络，
-实测值带标记、估算值标 `est`、不可测的格子直接写明原因。见
+**明确拒绝估算的三项**：避免选错 skill 重做的节省（需真实 A/B）、用与不用的实际差
+（该宿主无遥测）、省钱金额（需单价+实测）。`--actual-tokens` 只能填你从宿主读到的数。
+
+**加一个宿主是改数据不是改代码**：往 `TELEMETRY_HOSTS` 里加一条，然后跑测试。
+详见 [`references/MEASUREMENT.md`](skills/aletheia/references/MEASUREMENT.md)。
+
+记录只存在本机 `~/.aletheia/ledger.jsonl`。`report` 导出**自包含** HTML —— 无 CDN、无字体、
+无网络，实测值带标记、估算值标 `est`、不可测的格子直接写明原因。见
 [`docs/sample-report.html`](docs/sample-report.html)。
 
 ## 技能库健康维护

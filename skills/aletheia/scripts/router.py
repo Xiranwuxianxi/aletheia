@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 WORD_RE = re.compile(r"[a-z][a-z0-9+-]{1,}|[\u3400-\u9fff]{2,}", re.I)
 # Shared defaults. The CLI and the offline `eval` command must agree, otherwise
@@ -181,11 +181,14 @@ def default_roots(cwd: Path) -> list[Path]:
         for suffix in (".agents/skills", ".claude/skills", "skills"):
             roots.append(base / suffix)
     home = Path.home()
-    roots += [home / ".agents/skills", home / ".claude/skills", home / ".workbuddy/skills"]
+    roots += [home / ".agents/skills", home / ".claude/skills"]
     # Plugin/skillhub caches nest deeper (<vendor>/<plugin>/<version>/SKILL.md);
     # without this root a butler would report ~186 skills while the host actually
     # exposes ~90 more that it can never route to.
     roots += [home / ".workbuddy/plugins/cache", home / ".claude/plugins/cache"]
+    # Every supported host's own skill directory, so skills installed under a
+    # different agent are still visible to the butler.
+    roots += host_skill_roots()
     roots += [Path(x).expanduser() for x in os.getenv("SKILL_PATHS", "").split(os.pathsep) if x.strip()]
     return list(dict.fromkeys(roots))
 
@@ -1133,24 +1136,226 @@ def _esc(value: Any) -> str:
 # Hosts nest differently: Claude Code puts it at message.usage, Codex at the
 # top level. Both shapes are probed, because guessing wrong yields a confident
 # zero — the exact failure this whole feature must never have.
-TELEMETRY_HOSTS = {
+# --- Multi-host telemetry registry -------------------------------------------
+# Hosts disagree on almost everything: where sessions live, how deep they nest,
+# where the usage block sits, and even what the fields are called. Verified
+# against the layout each tool actually writes rather than assumed:
+#
+#   Claude Code   ~/.claude/projects/**/*.jsonl   message.usage
+#                 {input_tokens, output_tokens, cache_read_input_tokens,
+#                  cache_creation_input_tokens}
+#   Codex         ~/.codex/**/*.jsonl              usage
+#                 {input_tokens, output_tokens, input_token_details.cached_tokens}
+#   Kimi Code     ~/.kimi/sessions/**/wire.jsonl   message.payload.token_usage
+#                 {input_other, output, input_cache_read, input_cache_creation}
+#   Qwen Code     ~/.qwen/projects/**/*.jsonl      usageMetadata (Gemini lineage)
+#   Gemini CLI    $GEMINI_CLI_HOME/tmp/*/chats/*   usageMetadata
+#   Copilot CLI   ~/.copilot/{otel,session-state} events.jsonl
+#   OpenCode      ~/.local/share/opencode/storage/message/*.json
+#   Droid         ~/.factory/sessions/*.settings.json
+#   Kiro          ~/.kiro/sessions/cli/*.json
+#   Crush         ~/.local/share/crush/projects.json
+#
+# `aliases` normalises each host's field names onto ours. A host with no entry
+# here is reported unavailable — never zero.
+
+# Canonical buckets every adapter maps onto.
+TOKEN_FIELDS = ("input", "output", "cache_read", "cache_write")
+
+# Every literal that could introduce a usage block. Used only as a fast
+# prefilter; missing one of these would silently drop real data.
+USAGE_HINT_KEYS = (
+    "usage", "usageMetadata", "token_usage", "tokens", "totals", "metrics",
+    "prompt_tokens", "completion_tokens", "input_tokens", "output_tokens",
+    "cache_read", "cacheRead", "cache_creation", "cacheWrite", "cached_tokens",
+    "promptTokenCount", "candidatesTokenCount", "cachedContentTokenCount",
+    # Short field names used by Kimi, OpenCode and Kiro. A line carrying only
+    # these would otherwise be skipped before parsing.
+    "input", "output", "promptToken", "completionToken",
+    "cachedContent", "inputToken", "outputToken", "cacheWrite",
+)
+
+
+def _usage_prefilter(spec: dict[str, Any]) -> tuple[str, ...]:
+    """Hints for one host: the shared set plus its own path segments and aliases.
+
+    Deriving this from the adapter's own declaration means a newly added alias
+    cannot be silently filtered out — the guard is structural, not a ritual.
+    """
+    extra: list[str] = []
+    for path_tuple in spec.get("usage_paths", ()):
+        extra.extend(p for p in path_tuple if p)
+    for names in (spec.get("aliases") or {}).values():
+        extra.extend(names)
+    return tuple(dict.fromkeys(USAGE_HINT_KEYS + tuple(extra)))
+
+TELEMETRY_HOSTS: dict[str, dict[str, Any]] = {
     "claude": {
         "label": "Claude Code",
         "sessions": "~/.claude/projects",
-        "glob": "**/*.jsonl",
-        "usage_paths": (("usage",), ("message", "usage")),
+        "globs": ("**/*.jsonl",),
+        "usage_paths": (("message", "usage"), ("usage",)),
+        "aliases": {
+            "input": ("input_tokens", "input_other"),
+            "output": ("output_tokens", "output"),
+            "cache_read": ("cache_read_input_tokens", "input_cache_read"),
+            "cache_write": ("cache_creation_input_tokens", "input_cache_creation"),
+        },
+        "skills": ("~/.claude/skills",),
+        "native_skill_dir": ".claude/skills",
     },
     "codex": {
         "label": "Codex",
         "sessions": "~/.codex",
-        "glob": "**/*.jsonl",
-        "usage_paths": (("usage",), ("message", "usage")),
+        "globs": ("**/*.jsonl",),
+        "usage_paths": (("usage",), ("message", "usage"), ("token_usage",)),
+        "aliases": {
+            "input": ("input_tokens", "input_other"),
+            "output": ("output_tokens", "output"),
+            "cache_read": ("cache_read_input_tokens", "input_cache_read"),
+            "cache_write": ("cache_creation_input_tokens", "input_cache_creation"),
+        },
+        # Codex reports cache hits as a detail object, not a flat field.
+        "cache_read_from": ("input_token_details", "cached_tokens"),
+        "skills": ("~/.agents/skills",),
+        "native_skill_dir": ".agents/skills",
+    },
+    "kimi": {
+        "label": "Kimi Code",
+        "sessions": "~/.kimi/sessions",
+        "globs": ("**/wire.jsonl",),
+        "usage_paths": (("message", "payload", "token_usage"), ("token_usage",)),
+        "aliases": {
+            "input": ("input_other", "input_tokens"),
+            "output": ("output", "output_tokens"),
+            "cache_read": ("input_cache_read", "cache_read_input_tokens"),
+            "cache_write": ("input_cache_creation", "cache_creation_input_tokens"),
+        },
+        "skills": ("~/.kimi/skills", "~/.agents/skills"),
+        "native_skill_dir": ".kimi/skills",
+    },
+    "qwen": {
+        "label": "Qwen Code",
+        "sessions": "~/.qwen/projects",
+        "globs": ("**/*.jsonl",),
+        "usage_paths": (("usageMetadata",), ("message", "usageMetadata"), ("usage",)),
+        "aliases": {
+            "input": ("promptTokenCount", "input_tokens", "input_other"),
+            "output": ("candidatesTokenCount", "output_tokens", "output"),
+            "cache_read": ("cachedContentTokenCount", "cache_read_input_tokens", "input_cache_read"),
+            "cache_write": ("cache_creation_input_tokens", "input_cache_creation"),
+        },
+        "skills": ("~/.qwen/skills", "~/.agents/skills"),
+        "native_skill_dir": ".qwen/skills",
+    },
+    "gemini": {
+        "label": "Gemini CLI",
+        "sessions": "~/.gemini/tmp",
+        "globs": ("**/chats/*.json", "**/chats/*.jsonl"),
+        "usage_paths": (("usageMetadata",), ("message", "usageMetadata"), ("tokens",)),
+        "aliases": {
+            "input": ("promptTokenCount", "input_tokens", "input_other"),
+            "output": ("candidatesTokenCount", "output_tokens", "output"),
+            "cache_read": ("cachedContentTokenCount", "cache_read_input_tokens"),
+            "cache_write": ("cache_creation_input_tokens", "input_cache_creation"),
+        },
+        "skills": ("~/.gemini/extensions", "~/.agents/skills"),
+        "native_skill_dir": ".gemini/extensions",
+    },
+    "copilot": {
+        "label": "GitHub Copilot CLI",
+        "sessions": "~/.copilot",
+        "globs": ("otel/**/*.jsonl", "session-state/**/events.jsonl"),
+        "usage_paths": (("usage",), ("data", "usage"), ("payload", "usage")),
+        "aliases": {
+            "input": ("prompt_tokens", "input_tokens", "input_other"),
+            "output": ("completion_tokens", "output_tokens", "output"),
+            "cache_read": ("cache_read_input_tokens", "cached_tokens", "input_cache_read"),
+            "cache_write": ("cache_creation_input_tokens", "cache_write_tokens"),
+        },
+        "skills": ("~/.copilot/skills",),
+        "native_skill_dir": ".copilot/skills",
+    },
+    "opencode": {
+        "label": "OpenCode",
+        "sessions": "~/.local/share/opencode",
+        "globs": ("storage/message/**/*.json",),
+        "usage_paths": (("tokens",), ("usage",)),
+        "aliases": {
+            "input": ("input", "input_tokens"),
+            "output": ("output", "output_tokens"),
+            "cache_read": ("cache", "cache_read", "cache_read_input_tokens"),
+            "cache_write": ("cacheWrite", "cache_creation_input_tokens"),
+        },
+        "note": "SQLite store (opencode.db) is not read; only the JSON message store is.",
+        "skills": ("~/.config/opencode/skill", "~/.opencode/skills"),
+        "native_skill_dir": ".opencode/skills",
+    },
+    "droid": {
+        "label": "Factory Droid",
+        "sessions": "~/.factory/sessions",
+        "globs": ("*.json", "**/*.settings.json"),
+        "usage_paths": (("usage",), ("metadata", "usage"), ("totals",)),
+        "aliases": {
+            "input": ("input_tokens", "prompt_tokens"),
+            "output": ("output_tokens", "completion_tokens"),
+            "cache_read": ("cache_read_input_tokens", "cached_tokens"),
+            "cache_write": ("cache_creation_input_tokens",),
+        },
+        "skills": ("~/.factory/skills", "~/.agents/skills"),
+        "native_skill_dir": ".factory/skills",
+    },
+    "kiro": {
+        "label": "Kiro",
+        "sessions": "~/.kiro/sessions/cli",
+        "globs": ("*.json",),
+        "usage_paths": (("usage",), ("metrics", "usage")),
+        "aliases": {
+            "input": ("input_tokens", "inputTokens"),
+            "output": ("output_tokens", "outputTokens"),
+            "cache_read": ("cacheReadInputTokens", "cache_read_input_tokens"),
+            "cache_write": ("cacheWriteInputTokens", "cache_creation_input_tokens"),
+        },
+        "skills": ("~/.kiro/skills", "~/.agents/skills"),
+        "native_skill_dir": ".kiro/skills",
+    },
+    "crush": {
+        "label": "Crush",
+        "sessions": "~/.local/share/crush",
+        "globs": ("projects.json",),
+        "usage_paths": (("usage",), ("totals",), ("cumulative",)),
+        "aliases": {
+            "input": ("prompt_tokens", "input_tokens"),
+            "output": ("completion_tokens", "output_tokens"),
+            "cache_read": ("cache_read_tokens", "cache_read_input_tokens"),
+            "cache_write": ("cache_write_tokens",),
+        },
+        "skills": ("~/.local/share/crush/skills", "~/.agents/skills"),
+        "native_skill_dir": ".crush/skills",
+    },
+    "aider": {
+        "label": "Aider",
+        "sessions": "~/.aider",
+        "globs": ("**/*.jsonl", "**/*.json"),
+        "usage_paths": (("usage",), ("tokens",), ("messages",)),
+        "aliases": {
+            "input": ("prompt_tokens", "input_tokens"),
+            "output": ("completion_tokens", "output_tokens"),
+            "cache_read": ("cache_read_tokens",),
+            "cache_write": ("cache_write_tokens",),
+        },
+        "note": "Usage lives only when --analytics-log is enabled; nothing is sent anywhere.",
+        "skills": ("~/.aider/skills", "~/.agents/skills"),
+        "native_skill_dir": ".aider/skills",
     },
     "workbuddy": {
         "label": "WorkBuddy",
-        "sessions": None,  # no token telemetry is persisted
-        "glob": None,
-        "usage_paths": None,
+        "sessions": None,  # no token telemetry is persisted to disk
+        "globs": (),
+        "usage_paths": (),
+        "aliases": {},
+        "skills": ("~/.workbuddy/skills", "~/.workbuddy/plugins/cache"),
+        "native_skill_dir": ".workbuddy/skills",
     },
 }
 
@@ -1175,92 +1380,146 @@ def _int(value: Any) -> int:
     return value if isinstance(value, int) and value >= 0 else 0
 
 
+def _sum_aliases(usage: dict[str, Any], aliases: dict[str, tuple[str, ...]]) -> dict[str, int]:
+    """Map a host's field names onto our canonical buckets."""
+    out = {k: 0 for k in TOKEN_FIELDS}
+    for bucket, names in aliases.items():
+        for name in names:
+            if name in usage:
+                value = usage[name]
+                if isinstance(value, bool):
+                    continue
+                if isinstance(value, (int, float)):
+                    out[bucket] += int(value)
+                break
+    return out
+
+
+def _host_files(spec: dict[str, Any], root: Path, cutoff: float | None) -> list[Path]:
+    if not spec.get("sessions"):
+        return []
+    base = (root / str(spec["sessions"]).lstrip("~/")).expanduser()
+    if not base.is_dir():
+        return []
+    found: list[Path] = []
+    seen: set[str] = set()
+    for pattern in spec.get("globs", ()):  # a host may need several layouts
+        for path in base.glob(pattern):
+            key = str(path)
+            if key in seen:
+                continue
+            try:
+                if not path.is_file() or (cutoff and path.stat().st_mtime < cutoff):
+                    continue
+            except OSError:
+                continue
+            seen.add(key)
+            found.append(path)
+    return found
+
+
 def collect_host_usage(
     base: Path | None = None,
     since_days: float | None = None,
-    hosts: tuple[str, ...] = ("claude", "codex", "workbuddy"),
+    hosts: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Read real token usage from every host that persists it.
 
-    Returns a per-host breakdown. A host with no telemetry is present in the
-    result with `available: false` and a reason, so the absence is visible
-    rather than silently omitted.
+    Every host returns the same keys so a consumer never branches on shape. A
+    host with no telemetry — or with files whose format we do not recognise — is
+    reported `unavailable`, never `0`. A confident zero is a lie with extra
+    steps, and this project exists to avoid exactly that.
     """
     root = base or Path.home()
     cutoff = (time.time() - since_days * 86400) if since_days else None
+    wanted = hosts or tuple(TELEMETRY_HOSTS)
     out: dict[str, Any] = {}
 
-    for host in hosts:
+    for host in wanted:
         spec = TELEMETRY_HOSTS.get(host)
-        blank = {
-            "available": False,
-            "label": spec["label"] if spec else host,
-            "sessions_scanned": 0,
-            "messages_with_usage": 0,
-            "input_tokens": UNAVAILABLE,
-            "output_tokens": UNAVAILABLE,
-            "cache_read_tokens": UNAVAILABLE,
-            "cache_write_tokens": UNAVAILABLE,
-            "total_tokens_including_cache_read": UNAVAILABLE,
-            "billable_tokens_excluding_cache_read": UNAVAILABLE,
-            "provenance": UNAVAILABLE,
-            "reason": "",
-            "price_note": PRICE_HINT,
-        }
         if spec is None:
-            blank["reason"] = f"unknown host {host!r}"
-            out[host] = blank
-            continue
-        if not spec["sessions"]:
-            # Always the same keys, so a consumer never has to branch on shape.
-            blank["reason"] = "this host does not persist token usage to disk; read it from its own UI"
-            out[host] = blank
+            out[host] = {
+                "available": False, "label": host, "sessions_scanned": 0,
+                "messages_with_usage": 0, "input_tokens": UNAVAILABLE,
+                "output_tokens": UNAVAILABLE, "cache_read_tokens": UNAVAILABLE,
+                "cache_write_tokens": UNAVAILABLE,
+                "total_tokens_including_cache_read": UNAVAILABLE,
+                "billable_tokens_excluding_cache_read": UNAVAILABLE,
+                "provenance": UNAVAILABLE,
+                "reason": f"unknown host {host!r}; known: {', '.join(sorted(TELEMETRY_HOSTS))}",
+                "price_note": PRICE_HINT,
+            }
             continue
 
-        session_root = (root / spec["sessions"].lstrip("~/")).expanduser()
-        totals = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "messages": 0}
-        files = 0
-        shapes = spec["usage_paths"]
-        if session_root.is_dir():
-            for path in session_root.glob(spec["glob"]):
-                try:
-                    if not path.is_file() or cutoff and path.stat().st_mtime < cutoff:
+        aliases = spec.get("aliases") or {}
+        hints = _usage_prefilter(spec)
+        totals = {k: 0 for k in TOKEN_FIELDS}
+        messages = 0
+        files = _host_files(spec, root, cutoff)
+
+        if spec.get("sessions") and not files:
+            reason = "session directory not found on this machine"
+        elif not spec.get("sessions"):
+            reason = "this host does not persist token usage to disk; read it from its own UI"
+        else:
+            reason = ""
+
+        for path in files:
+            try:
+                handle = path.open("r", encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            with handle:
+                for line in handle:
+                    # Cheap prefilter, derived from this host's own declaration
+                    # so a newly added alias cannot be skipped before parsing.
+                    if not any(k in line for k in hints):
                         continue
-                except OSError:
-                    continue
-                files += 1
-                try:
-                    with path.open("r", encoding="utf-8", errors="replace") as handle:
-                        for line in handle:
-                            if '"usage"' not in line:
-                                continue
-                            try:
-                                record = json.loads(line)
-                            except ValueError:
-                                continue
-                            usage = None
-                            for candidate_path in shapes:
-                                usage = _dig(record, candidate_path)
-                                if usage is not None:
-                                    break
-                            if not usage:
-                                continue
-                            totals["input"] += _int(usage.get("input_tokens"))
-                            totals["output"] += _int(usage.get("output_tokens"))
-                            totals["cache_read"] += _int(usage.get("cache_read_input_tokens"))
-                            totals["cache_write"] += _int(usage.get("cache_creation_input_tokens"))
-                            totals["messages"] += 1
-                except OSError:
-                    continue
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(record, list):  # some tools emit an array per file
+                        items: list[Any] = record
+                    else:
+                        items = [record]
+                    for item in items:
+                        usage = None
+                        for path_tuple in spec.get("usage_paths", ()):
+                            usage = _dig(item, path_tuple)
+                            if usage is not None:
+                                break
+                        if not usage:
+                            continue
+                        # Some hosts bury cache hits in a nested detail object.
+                        # Look inside the usage block *and* at the record root,
+                        # since Codex puts input_token_details beside usage
+                        # rather than inside it. Only synthesize when non-zero —
+                        # otherwise this would overwrite a real logged value.
+                        detail = None
+                        if isinstance(usage.get("input_token_details"), dict):
+                            detail = usage["input_token_details"]
+                        else:
+                            nested = _dig(item, tuple(spec.get("cache_read_from", ())))
+                            detail = nested if isinstance(nested, dict) else None
+                        if detail and _int(detail.get("cached_tokens")):
+                            usage = {**usage, "cache_read_input_tokens": _int(detail.get("cached_tokens"))}
+                        counts = _sum_aliases(usage, aliases)
+                        if not any(counts.values()):
+                            continue
+                        for key in TOKEN_FIELDS:
+                            totals[key] += counts[key]
+                        messages += 1
+            # A JSON-array file is processed line-by-line above; that is harmless
+            # because a pretty-printed array simply fails to parse per line.
 
+        measurable = messages > 0
         billable = totals["input"] + totals["output"] + totals["cache_write"]
-        # A host with files but no parseable usage is an unknown, not a zero.
-        measurable = totals["messages"] > 0
-        out[host] = {
-            **blank,
+        record_out = {
             "available": measurable,
-            "sessions_scanned": files,
-            "messages_with_usage": totals["messages"],
+            "label": spec["label"],
+            "sessions_scanned": len(files),
+            "messages_with_usage": messages,
             "input_tokens": totals["input"] if measurable else UNAVAILABLE,
             "output_tokens": totals["output"] if measurable else UNAVAILABLE,
             "cache_read_tokens": totals["cache_read"] if measurable else UNAVAILABLE,
@@ -1269,10 +1528,40 @@ def collect_host_usage(
             "billable_tokens_excluding_cache_read": billable if measurable else UNAVAILABLE,
             "provenance": "read directly from host session files" if measurable else UNAVAILABLE,
             "reason": "" if measurable else (
-                "session files found but none contained a parseable usage block; the format may have changed"
+                reason or "session files found but none contained a usage block this adapter recognises; "
+                          "the format may have changed"
             ),
+            "price_note": PRICE_HINT,
         }
+        if spec.get("note"):
+            record_out["note"] = spec["note"]
+        out[host] = record_out
     return out
+
+
+def host_skill_roots(hosts: tuple[str, ...] | None = None) -> list[Path]:
+    """Skill directories belonging to each supported host, deduplicated."""
+    roots: list[Path] = []
+    for host in hosts or tuple(TELEMETRY_HOSTS):
+        spec = TELEMETRY_HOSTS.get(host)
+        if not spec:
+            continue
+        for raw in spec.get("skills", ()):
+            roots.append((Path.home() / str(raw).lstrip("~/")).expanduser())
+    return list(dict.fromkeys(roots))
+
+
+def list_hosts() -> list[dict[str, Any]]:
+    """Host capability summary, so a butler can say what it can and cannot see."""
+    return [
+        {
+            "id": host,
+            "label": spec["label"],
+            "telemetry": bool(spec.get("sessions")),
+            "skill_dir": spec.get("native_skill_dir", ""),
+        }
+        for host, spec in sorted(TELEMETRY_HOSTS.items())
+    ]
 
 
 # --- Library audit: breakage, staleness, redundancy --------------------------
@@ -1730,9 +2019,12 @@ def main(argv: list[str] | None = None) -> int:
 
     tel = sub.add_parser("telemetry", help="read real token usage from hosts that persist it")
     tel.add_argument("--since-days", type=float, default=None, help="only sessions modified within N days")
-    tel.add_argument("--host", action="append", default=[], help="restrict to a host (claude, codex, workbuddy)")
+    tel.add_argument("--host", action="append", default=[], help="restrict to a host id, or 'all'; omit for every known host")
     tel.add_argument("--record", type=Path, default=None, help="append this measurement to the ledger")
     tel.add_argument("--ledger", type=Path, default=None, help="override ledger location")
+
+    hosts_cmd = sub.add_parser("hosts", help="list every supported agent host and what can be read from it")
+    hosts_cmd.add_argument("--json", action="store_true", help="machine-readable output (default)")
 
     aud = sub.add_parser("audit", help="inspect the whole library for breakage, staleness and redundancy")
     aud.add_argument("--root", action="append", default=[])
@@ -1743,8 +2035,19 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    if args.command == "hosts":
+        print(json.dumps({
+            "supported": list_hosts(),
+            "skill_roots": [str(p) for p in host_skill_roots() if p.is_dir()],
+            "note": (
+                "A host without telemetry is still supported for skill discovery and routing. "
+                "Usage figures are only produced where the host actually persists them."
+            ),
+        }, ensure_ascii=False, indent=2))
+        return 0
+
     if args.command == "telemetry":
-        hosts = tuple(args.host) if args.host else ("claude", "codex", "workbuddy")
+        hosts = tuple(sorted(TELEMETRY_HOSTS)) if "all" in (args.host or []) else tuple(args.host or ())
         usage = collect_host_usage(since_days=args.since_days, hosts=hosts)
         payload = {
             "measured": True,

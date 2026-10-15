@@ -4,6 +4,63 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.6.0 — 2026-10-15
+
+Aletheia now covers the mainstream agent hosts, not just the two it was built
+against. Each was verified against the layout that tool actually writes.
+
+### Added
+
+- **Twelve host adapters** in a declarative registry: Claude Code, Codex, Kimi
+  Code, Qwen Code, Gemini CLI, GitHub Copilot CLI, OpenCode, Factory Droid,
+  Kiro, Crush, Aider and WorkBuddy.
+- **An alias table** normalising every host's field names onto one shape
+  (`input · output · cache_read · cache_write`). This is the part that matters:
+  hosts disagree on *everything*.
+- **`hosts` subcommand**: what is supported, which can be read, and each host's
+  native skill directory.
+- **Multi-glob per host**, so a tool that writes several layouts is still found.
+- **Skill discovery across hosts**: `default_roots` now includes every supported
+  host's skill directory. Unique skills visible on this machine went from
+  **233 to 252**, since skills installed under a different agent are now seen.
+- Tests that guard the registry structurally: every alias must be reachable by
+  the line prefilter, and every host must return an identical key set.
+- `references/MEASUREMENT.md` documents each host's session path, usage block and
+  field names, plus how to add one without touching code.
+
+### Measured on this machine
+
+| Host | Files | Messages | Input | Output | Cache read |
+| --- | --- | --- | --- | --- | --- |
+| Claude Code | 2 | 29 | 58 | 8,951 | 2,377,969 |
+| Codex | 141 | 1 | 180 | 96 | 48 |
+| Kimi Code | 49 | 3,401 | 8,842,282 | 1,917,619 | 359,392,132 |
+| Qwen Code | 4 | 106 | 2,523,460 | 51,844 | 2,356,065 |
+
+Gemini CLI, Copilot CLI, OpenCode, Droid, Kiro, Crush and Aider report
+`unavailable` on this machine — some because they are not installed, and
+WorkBuddy because it persists no usage at all.
+
+### Fixed
+
+- **A synthesized cache-read zero could overwrite a real logged value.** Codex
+  carries `cached_tokens` under `input_token_details`; when that lookup failed,
+  a `0` was written over the true figure — understating cost by orders of
+  magnitude. Only a present, non-zero nested value is now merged.
+- **The line prefilter could drop a real usage line.** It keyed on `"token"` or
+  `"usage"` only, so a line carrying just `cache_read_input_tokens` was skipped.
+  The prefilter is now derived from each host's own declaration, so a newly
+  added alias cannot be filtered out by accident.
+- **Codex cache reads were invisible** because the nested detail object sits
+  *beside* `usage`, not inside it.
+
+### Known limits, stated plainly
+
+- OpenCode and Goose keep usage in SQLite. Aletheia is stdlib-only and reads only
+  their JSON message stores; when none exists the host reports `unavailable`.
+- Adapters track each tool's file format, which can change without notice. An
+  unrecognised layout reports `unavailable` with a reason — never a zero.
+
 ## 1.5.0 — 2026-10-15
 
 Honest measurement across every host, plus lifecycle management for the library

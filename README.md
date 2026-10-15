@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
-[![Version](https://img.shields.io/badge/version-1.5.0-888780?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.6.0-888780?style=flat-square)](CHANGELOG.md)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -215,22 +215,42 @@ verified · omit the bar for small tasks.
 ## Measuring what it actually costs
 
 ```bash
-python skills/aletheia/scripts/router.py telemetry
-python skills/aletheia/scripts/router.py measure "export Q3 to PDF" --only excel-xlsx --phase before
+python skills/aletheia/scripts/router.py hosts        # what is supported
+python skills/aletheia/scripts/router.py telemetry    # real totals
 python skills/aletheia/scripts/router.py report --out report.html
 ```
 
-Real token usage is read from the hosts that persist it:
+Twelve mainstream hosts are registered. **Every host returns the same keys**, and
+one we cannot read is reported `unavailable` — never `0`.
 
-| Host | Telemetry | Source |
-| --- | --- | --- |
-| Claude Code | **measured** | `~/.claude/projects/**/*.jsonl` |
-| Codex | **measured** | `~/.codex/**/*.jsonl` |
-| WorkBuddy | `unavailable` | nothing persisted; read its own UI |
+| Host | Telemetry | Host | Telemetry |
+| --- | --- | --- | --- |
+| Claude Code | measured | OpenCode | partial (JSON store) |
+| Codex | measured | Droid | measured |
+| Kimi Code | measured | Kiro | measured |
+| Qwen Code | measured | Crush | measured |
+| Gemini CLI | measured | Aider | if enabled |
+| Copilot CLI | measured | WorkBuddy | none persisted |
 
-A host with no telemetry reads **`unavailable`, never `0`** — a zero would be a
-claim, and it would be wrong. Cache reads are listed separately from fresh input
-because they cost a fraction of it.
+Each host names its fields differently — Claude logs `cache_read_input_tokens`,
+Codex hides `cached_tokens` inside `input_token_details`, Kimi uses
+`input_cache_read` under `message.payload.token_usage`, Qwen and Gemini use
+`promptTokenCount`. Adapters map them onto one shape via an alias table; a layout
+that is not recognised reports `unavailable` rather than a confident zero.
+
+Measured on one machine:
+
+```text
+host                  ok  files  msgs           input      output    cache_read
+Claude Code           Y   2      29                58       8,951     2,377,969
+Codex                 Y   141    1                180          96            48
+Kimi Code             Y   49     3401       8,842,282   1,917,619   359,392,132
+Qwen Code             Y   4      106        2,523,460      51,844     2,356,065
+Gemini CLI            -   0      -                              unavailable
+```
+
+Cache reads are counted separately from fresh input because they cost a fraction
+of it; blending them would misstate cost by an order of magnitude.
 
 **What is refused rather than estimated:**
 
@@ -242,6 +262,9 @@ because they cost a fraction of it.
 
 `--actual-tokens` is only ever a number **you** read from the host. The tool will
 not derive it.
+
+Adding a host is a data change: append to `TELEMETRY_HOSTS`, run the tests. See
+[`references/MEASUREMENT.md`](skills/aletheia/references/MEASUREMENT.md).
 
 Records stay local in `~/.aletheia/ledger.jsonl`. `report` exports a
 self-contained HTML file — no CDN, no fonts, no network — where measured values

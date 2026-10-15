@@ -437,6 +437,113 @@ class RouterTests(unittest.TestCase):
             self.assertEqual(100, result["claude"]["cache_read_tokens"])
             self.assertEqual(2, result["claude"]["messages_with_usage"])
 
+    def test_nested_cache_detail_does_not_clobber_a_real_flat_value(self):
+        """A synthesized zero must never overwrite a cache_read that was logged."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            sessions = base / ".claude" / "projects" / "p"
+            sessions.mkdir(parents=True)
+            (sessions / "a.jsonl").write_text(
+                json.dumps({"message": {"usage": {"input_tokens": 1, "cache_read_input_tokens": 500}}}) + "\n",
+                encoding="utf-8",
+            )
+            result = router.collect_host_usage(base=base, hosts=("claude",))
+            self.assertEqual(500, result["claude"]["cache_read_tokens"])
+
+    def test_codex_nested_cached_tokens_are_read(self):
+        """Codex reports cache hits under input_token_details.cached_tokens."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            sessions = base / ".codex" / "sessions"
+            sessions.mkdir(parents=True)
+            (sessions / "r.jsonl").write_text(
+                json.dumps({"usage": {"input_tokens": 200, "output_tokens": 50,
+                                      "input_token_details": {"cached_tokens": 70}}}) + "\n",
+                encoding="utf-8",
+            )
+            result = router.collect_host_usage(base=base, hosts=("codex",))
+            self.assertEqual(70, result["claude" if False else "codex"]["cache_read_tokens"])
+
+    def test_kimi_wire_format_is_understood(self):
+        """Kimi nests token_usage under message.payload with its own field names."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            sessions = base / ".kimi" / "sessions" / "s1"
+            sessions.mkdir(parents=True)
+            (sessions / "wire.jsonl").write_text(
+                json.dumps({"message": {"payload": {"token_usage": {
+                    "input_other": 1874, "output": 140,
+                    "input_cache_read": 5376, "input_cache_creation": 7}}}}) + "\n",
+                encoding="utf-8",
+            )
+            result = router.collect_host_usage(base=base, hosts=("kimi",))
+            self.assertTrue(result["kimi"]["available"])
+            self.assertEqual(1874, result["kimi"]["input_tokens"])
+            self.assertEqual(140, result["kimi"]["output_tokens"])
+            self.assertEqual(5376, result["kimi"]["cache_read_tokens"])
+            self.assertEqual(7, result["kimi"]["cache_write_tokens"])
+
+    def test_qwen_gemini_style_usage_metadata(self):
+        """Gemini and Qwen share a lineage and use promptTokenCount naming."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            sessions = base / ".qwen" / "projects" / "p" / "chats"
+            sessions.mkdir(parents=True)
+            (sessions / "s.jsonl").write_text(
+                json.dumps({"usageMetadata": {"promptTokenCount": 900,
+                                              "candidatesTokenCount": 120,
+                                              "cachedContentTokenCount": 300}}) + "\n",
+                encoding="utf-8",
+            )
+            result = router.collect_host_usage(base=base, hosts=("qwen",))
+            self.assertTrue(result["qwen"]["available"])
+            self.assertEqual(900, result["qwen"]["input_tokens"])
+            self.assertEqual(120, result["qwen"]["output_tokens"])
+            self.assertEqual(300, result["qwen"]["cache_read_tokens"])
+
+    def test_unknown_host_is_reported_not_guessed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = router.collect_host_usage(base=Path(tmp), hosts=("not-a-host",))
+            self.assertFalse(result["not-a-host"]["available"])
+            self.assertEqual(router.UNAVAILABLE, result["not-a-host"]["total_tokens_including_cache_read"])
+            self.assertIn("unknown host", result["not-a-host"]["reason"])
+
+    def test_every_registered_host_normalises_to_the_same_keys(self):
+        """A consumer must never have to branch on which host lacked data."""
+        reference = None
+        for host, spec in router.TELEMETRY_HOSTS.items():
+            with tempfile.TemporaryDirectory() as tmp:
+                result = router.collect_host_usage(base=Path(tmp), hosts=(host,))[host]
+            keys = {k for k, v in result.items() if k not in ("note",)}
+            if reference is None:
+                reference = keys
+            self.assertEqual(reference, keys, f"{host} returns a different key set")
+
+    def test_registry_covers_the_mainstream_agents(self):
+        """The registry must know the widely used hosts, not just two."""
+        for expected in ("claude", "codex", "gemini", "qwen", "copilot", "kimi",
+                         "opencode", "droid", "kiro", "crush", "aider", "workbuddy"):
+            self.assertIn(expected, router.TELEMETRY_HOSTS)
+        for host, spec in router.TELEMETRY_HOSTS.items():
+            self.assertIn("skills", spec, f"{host} must declare its skill directories")
+            self.assertTrue(spec.get("native_skill_dir"), f"{host} must name its skill dir")
+            if spec.get("sessions"):
+                self.assertTrue(spec.get("aliases"), f"{host} needs field aliases")
+
+    def test_alias_table_prefilter_cannot_drop_a_real_line(self):
+        """Every alias must be reachable by the prefilter, or its data goes missing."""
+        for host, spec in router.TELEMETRY_HOSTS.items():
+            hints = router._usage_prefilter(spec)
+            for bucket, names in (spec.get("aliases") or {}).items():
+                for name in names:
+                    self.assertTrue(
+                        name in hints,
+                        f"{host}.{bucket} alias {name!r} would be filtered out before parsing",
+                    )
+            for path_tuple in spec.get("usage_paths", ()):
+                for segment in path_tuple:
+                    self.assertIn(segment, hints, f"{host} usage path segment {segment!r} must be a hint")
+
     def test_audit_finds_and_counts_damage(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
