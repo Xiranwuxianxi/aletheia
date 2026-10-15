@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
-[![Version](https://img.shields.io/badge/version-1.7.0-888780?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.7.1-888780?style=flat-square)](CHANGELOG.md)
 
 [English](README.md) · **简体中文**
 

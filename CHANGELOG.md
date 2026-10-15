@@ -4,6 +4,45 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.7.1 — 2026-10-15
+
+Structure fix in `SKILL.md`, found by measuring instead of assuming.
+
+### Fixed
+
+- **Six core sections were accidentally demoted to `###`.** `Candidate
+  discovery`, `Session scoping`, `Context pressure`, `Decision policy`,
+  `Orchestration & context budget` and `Evidence standard` were nested *inside*
+  "Progress reporting". A reader following progressive disclosure would have
+  finished the progress-bar section and stopped — never reaching the routing
+  rules. All six are top-level `##` again. This was a plain editing mistake of
+  mine, and it hid the most important content in the file.
+- **Progress reporting compressed** from a full table plus seven rules down to
+  the three that carry the weight (no invented ETA, 100% means verified, small
+  tasks get no bar). The state table and anti-patterns were already in
+  `references/PROGRESS.md`, so the detail was duplicated for no gain.
+
+### Tests
+
+Four structural guards, so this class of mistake cannot recur:
+
+- Every core capability must be a top-level `##`. Verified to actually fail by
+  demoting `Decision policy` and watching the suite catch it.
+- `SKILL.md` must stay under the spec's 500-line guidance. It is 240.
+- The frontmatter `description` must keep headroom under 1024 chars — currently
+  714, so the skill can still grow.
+- Every `references/*.md` named in `SKILL.md` must exist, so a pointer is never
+  dangling.
+
+66 tests pass.
+
+### On the earlier claim
+
+A previous note said `SKILL.md` was "2400+ lines". That was wrong — it
+conflated `router.py` (2,443 lines of code) with `SKILL.md`. At 247 lines it was
+already well within the spec's guidance, so no size-driven rewrite was needed.
+The real problem was the section hierarchy, which measurement surfaced.
+
 ## 1.7.0 — 2026-10-15
 
 Reports gain a third delivery tier, because "can't publish a URL" is a delivery

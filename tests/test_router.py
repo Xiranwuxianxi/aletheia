@@ -681,6 +681,56 @@ class RouterTests(unittest.TestCase):
                              .get(suffix, "html"))
         self.assertEqual(cases[".md"], "md")
 
+    def test_skill_md_sections_are_not_nested_by_accident(self):
+        """A demoted '##' silently buries routing rules under an unrelated topic.
+
+        Every top-level capability needs its own '##'. Without this guard, a
+        future edit can nest 'Candidate discovery' or 'Decision policy' under
+        whatever section happened to be edited last.
+        """
+        text = (ROOT / "skills/aletheia/SKILL.md").read_text(encoding="utf-8")
+        required = [
+            "Purpose",
+            "Who chooses",
+            "Mandatory preflight",
+            "Transparency",
+            "Stop gates",
+            "Progress reporting",
+            "Candidate discovery",
+            "Session scoping",
+            "Context pressure",
+            "Decision policy",
+            "Evidence standard",
+        ]
+        for heading in required:
+            self.assertIn(
+                f"\n## {heading}", text,
+                f"'{heading}' must be a top-level section, not nested under another",
+            )
+
+    def test_skill_md_stays_within_the_spec_size_guidance(self):
+        """The spec recommends under 500 lines; progressive disclosure needs slack."""
+        lines = (ROOT / "skills/aletheia/SKILL.md").read_text(encoding="utf-8").splitlines()
+        self.assertLess(len(lines), 500, "SKILL.md must stay under the spec's 500-line guidance")
+
+    def test_skill_md_description_fits_the_spec_limit(self):
+        text = (ROOT / "skills/aletheia/SKILL.md").read_text(encoding="utf-8")
+        front = text.split("---")[1]
+        match = re.search(r"description: >-\n(.*?)\nlicense:", front, re.S)
+        self.assertIsNotNone(match, "description must use the block form")
+        description = " ".join(l.strip() for l in match.group(1).splitlines() if l.strip())
+        # Leave headroom: a description at the limit cannot grow with the skill.
+        self.assertLess(len(description), 1000, f"description is {len(description)} chars")
+
+    def test_every_reference_named_in_skill_md_exists(self):
+        """A pointer to a missing file is worse than no pointer."""
+        text = (ROOT / "skills/aletheia/SKILL.md").read_text(encoding="utf-8")
+        refs = set(re.findall(r"`references/([A-Z_]+\.md)`", text))
+        self.assertGreaterEqual(len(refs), 6, "SKILL.md should point at its reference set")
+        for ref in sorted(refs):
+            self.assertTrue((ROOT / "skills/aletheia/references" / ref).is_file(),
+                            f"SKILL.md references {ref}, which does not exist")
+
     def test_repair_handles_crlf_without_corrupting(self):
         """Windows checkouts are CRLF; a bare-\\n regex silently fails there."""
         with tempfile.TemporaryDirectory() as tmp:

@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 WORD_RE = re.compile(r"[a-z][a-z0-9+-]{1,}|[\u3400-\u9fff]{2,}", re.I)
 # Shared defaults. The CLI and the offline `eval` command must agree, otherwise
