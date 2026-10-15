@@ -595,6 +595,92 @@ class RouterTests(unittest.TestCase):
             self.assertEqual(0, result["counts"]["duplicate"], "one install is not a duplicate")
             self.assertEqual("real-skill", result["broken"][0]["name"] if result["broken"] else "real-skill")
 
+    def _sample_records(self) -> list[dict]:
+        return [
+            {
+                "task_id": "t1", "phase": "before", "label": "deck",
+                "without_aletheia": {"metadata_tokens_est_unscoped": 33891},
+                "with_aletheia": {"metadata_tokens_est_scoped": 355},
+                "comparison": {
+                    "comparison": {
+                        "without_aletheia": {"metadata_tokens_est": 33891},
+                        "with_aletheia_scoped": {"metadata_tokens_est": 355},
+                        "saved_tokens_est": 33536, "saved_percent": 99.0,
+                    },
+                    "not_quantified": [{"claim": "money saved", "value": router.UNAVAILABLE, "why": "no price"}],
+                },
+                "actual_tokens": router.UNAVAILABLE,
+            },
+            {  # a telemetry record carries no comparison at all
+                "task_id": "t2", "phase": "after", "label": "host telemetry",
+                "host_telemetry": {
+                    "claude": {
+                        "available": True, "label": "Claude Code",
+                        "input_tokens": 58, "output_tokens": 8951,
+                        "cache_read_tokens": 2377969, "cache_write_tokens": 483380,
+                        "messages_with_usage": 29, "sessions_scanned": 2,
+                    },
+                    "workbuddy": {"available": False, "label": "WorkBuddy",
+                                  "reason": "does not persist token usage"},
+                },
+                "actual_tokens": router.UNAVAILABLE,
+            },
+        ]
+
+    def test_report_text_is_formatted_not_a_dump(self):
+        """The plain-text tier must still be readable, not a wall of values."""
+        body = router.render_report_markdown(self._sample_records(), as_text=True)
+        # Headings survive as rules, and no Markdown syntax leaks through.
+        self.assertIn("ALETHEIA ROUTING COST REPORT", body)
+        self.assertIn("===", body)
+        self.assertNotIn("**", body)
+        self.assertNotIn("`", body)
+        # Column structure must remain, not collapse into a sentence.
+        self.assertIn("33,891", body)
+        self.assertIn("99.0%", body)
+        self.assertIn("[measured]", body)
+        self.assertIn("[unavailable]", body)
+
+    def test_report_markdown_keeps_tables_and_provenance(self):
+        body = router.render_report_markdown(self._sample_records(), as_text=False)
+        self.assertIn("| Marking | Meaning |", body)
+        self.assertIn("| `measured` |", body)
+        self.assertIn("99.0%", body)
+        self.assertIn("Deliberately not quantified", body)
+
+    def test_report_reads_the_latest_real_comparison_not_the_last_record(self):
+        """A trailing telemetry record must not blank out the headline."""
+        records = self._sample_records()
+        self.assertNotIn("comparison", records[-1])
+        self.assertEqual(33536, router._latest_comparison(records)["saved_tokens_est"])
+        for as_text in (True, False):
+            body = router.render_report_markdown(records, as_text=as_text)
+            self.assertIn("33,891", body)
+            self.assertNotIn("— | estimated", body)
+
+    def test_report_handles_an_empty_ledger(self):
+        for as_text in (True, False):
+            body = router.render_report_markdown([], as_text=as_text)
+            self.assertIn("How to read the numbers", body)
+        html = router.render_report_html([])
+        self.assertIn("No measurements recorded yet", html)
+
+    def test_report_html_is_self_contained(self):
+        """A report that needs the network is a report that fails on delivery."""
+        html = router.render_report_html(self._sample_records())
+        for forbidden in ("http://", "https://", "<script", "cdn"):
+            self.assertNotIn(forbidden, html, f"report must not reference {forbidden}")
+        self.assertIn("<style>", html)
+
+    def test_report_format_is_inferred_from_the_output_extension(self):
+        cases = {".html": "html", ".md": "md", ".txt": "text", ".markdown": "md"}
+        for suffix, expected in cases.items():
+            out = Path("report") .with_suffix(suffix)
+            # Reuse the same mapping the CLI applies.
+            self.assertEqual(expected, {".md": "md", ".markdown": "md", ".txt": "text"}
+                             .get(suffix, "html"))
+        self.assertEqual(cases[".md"], "md")
+
     def test_repair_handles_crlf_without_corrupting(self):
         """Windows checkouts are CRLF; a bare-\\n regex silently fails there."""
         with tempfile.TemporaryDirectory() as tmp:

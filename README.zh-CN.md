@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
-[![Version](https://img.shields.io/badge/version-1.6.0-888780?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.7.0-888780?style=flat-square)](CHANGELOG.md)
 
 [English](README.md) · **简体中文**
 
@@ -242,6 +242,22 @@ cache read 单独统计而不并入总计——它便宜得多，混在一起成
 记录只存在本机 `~/.aletheia/ledger.jsonl`。`report` 导出**自包含** HTML —— 无 CDN、无字体、
 无网络，实测值带标记、估算值标 `est`、不可测的格子直接写明原因。见
 [`docs/sample-report.html`](docs/sample-report.html)。
+
+### 发不了网址时的交付方式
+
+报告传不上去是**交付问题**，不是「那就将就看吧」的理由。同一份数据三种形态：
+
+```bash
+python skills/aletheia/scripts/router.py report --out report.html   # 网页文件，离线可开
+python skills/aletheia/scripts/router.py report --out report.md     # issue / PR / 文档
+python skills/aletheia/scripts/router.py report --format text       # 聊天窗口 / 终端
+```
+
+格式按 `--format` → 输出扩展名 → 默认 HTML 依次判定。不给 `--out` 就直接输出到
+stdout，可以直接粘贴。
+
+**文本形态是排好版的文档，不是数据倾倒**：标题分隔线、列对齐、出处图例、
+每个数字标注 measured / estimated / unavailable。聊天框里甩一堆裸数字**不在可选范围内**。
 
 ## 技能库健康维护
 

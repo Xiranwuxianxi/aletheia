@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 WORD_RE = re.compile(r"[a-z][a-z0-9+-]{1,}|[\u3400-\u9fff]{2,}", re.I)
 # Shared defaults. The CLI and the offline `eval` command must agree, otherwise
@@ -995,7 +995,7 @@ def render_report_html(records: list[dict[str, Any]]) -> str:
             )
             break
 
-    last_cmp = records[-1].get("comparison", {}).get("comparison", {}) if records else {}
+    last_cmp = _latest_comparison(records)
     last_without = records[-1].get("without_aletheia", {}) if records else {}
     last_with = records[-1].get("with_aletheia", {}) if records else {}
     without_tokens = last_cmp.get("without_aletheia", {}).get("metadata_tokens_est", "—")
@@ -1952,6 +1952,165 @@ def render_audit_text(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _latest_comparison(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Newest record that actually carries a scenario comparison.
+
+    Telemetry records have none, so blindly reading `records[-1]` produced a
+    headline of em-dashes even when a real comparison sat one line above it.
+    """
+    for rec in reversed(records):
+        comparison = (rec.get("comparison") or {}).get("comparison")
+        if comparison and "saved_tokens_est" in comparison:
+            return comparison
+    return {}
+
+
+def render_report_markdown(records: list[dict[str, Any]], as_text: bool = False) -> str:
+    """Readable-in-a-chat rendering of the same data as the HTML report.
+
+    This exists because a report has three delivery tiers — URL, file, then
+    plain text — and the third must still be *formatted*. Falling back to a bare
+    dump of numbers would be a downgrade the reader can feel. Same data, same
+    three-state labelling, laid out for reading rather than for printing.
+    """
+    def n(value: Any) -> str:
+        if isinstance(value, int):
+            return f"{value:,}"
+        return str(value)
+
+    def tag(state: str) -> str:
+        if as_text:
+            return f"[{state}]"
+        return f"**{state}**"
+
+    lines: list[str] = []
+    add = lines.append
+
+    add("# Aletheia routing cost report" if not as_text else "ALETHEIA ROUTING COST REPORT")
+    add("")
+    add(f"_Generated {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())} · {len(records)} record(s) · local ledger_")
+    add("")
+
+    # Provenance legend first, so nothing below can be misread.
+    add("## How to read the numbers")
+    add("")
+    add("| Marking | Meaning |")
+    add("| --- | --- |")
+    add("| `measured` | read directly from host session files on this machine |")
+    add("| `est` | estimated from measured characters via a documented bytes-per-token constant |")
+    add("| `unavailable` | the host exposes no such figure; deliberately left blank |")
+    add("")
+
+    last_cmp = _latest_comparison(records)
+    without_tokens = last_cmp.get("without_aletheia", {}).get("metadata_tokens_est", "—")
+    with_tokens = last_cmp.get("with_aletheia_scoped", {}).get("metadata_tokens_est", "—")
+    saved = last_cmp.get("saved_tokens_est")
+    pct = last_cmp.get("saved_percent")
+
+    add("## Headline")
+    add("")
+    add("| Metric | Value | Basis |")
+    add("| --- | ---: | --- |")
+    add(f"| Metadata tokens, no routing | {n(without_tokens)} | estimated |")
+    add(f"| Metadata tokens, scoped | {n(with_tokens)} | estimated |")
+    if isinstance(saved, int):
+        add(f"| Reduction | {n(saved)} ({pct}%) | estimated |")
+    add("| Actual host tokens | see per-host table below | measured where the host logs it |")
+    add("")
+
+    telemetry: dict[str, Any] = {}
+    for rec in reversed(records):
+        if rec.get("host_telemetry"):
+            telemetry = rec["host_telemetry"]
+            break
+    if telemetry:
+        add("## Actual host usage, read from session files")
+        add("")
+        add("| Host | Status | Input | Output | Cache read | Cache write | Messages |")
+        add("| --- | --- | ---: | ---: | ---: | ---: | ---: |")
+        for info in telemetry.values():
+            label = info.get("label", "?")
+            if info.get("available"):
+                add(
+                    f"| {label} | {tag('measured')} | {n(info['input_tokens'])} | {n(info['output_tokens'])} |"
+                    f" {n(info['cache_read_tokens'])} | {n(info['cache_write_tokens'])} |"
+                    f" {n(info['messages_with_usage'])} |"
+                )
+            else:
+                reason = info.get("reason", "")
+                add(f"| {label} | {tag('unavailable')} | — | — | — | — | — |")
+                if reason:
+                    # Indented continuation row, so the reason stays attached to
+                    # its host instead of floating as a stray line.
+                    add(f"| ↳ reason | {reason} | | | | | |")
+        add("")
+        add("_Cache reads cost a fraction of fresh input, so they are never blended into one total._")
+        add("")
+
+    if records:
+        add("## Measurements")
+        add("")
+        add("| Task id | Phase | Label | No routing | Scoped | Actual |")
+        add("| --- | --- | --- | ---: | ---: | ---: |")
+        for rec in records:
+            with_a = rec.get("with_aletheia", {})
+            without = rec.get("without_aletheia", {})
+            actual = rec.get("actual_tokens", UNAVAILABLE)
+            if "metadata_tokens_est_unscoped" in without:
+                no_col = f"{n(without['metadata_tokens_est_unscoped'])} est"
+                yes_col = f"{n(with_a.get('metadata_tokens_est_scoped', 0))} est"
+            else:
+                no_col = yes_col = "n/a"
+            act_col = n(actual) if isinstance(actual, int) else "unavailable"
+            add(
+                f"| `{rec.get('task_id', '')}` | {rec.get('phase', '')} |"
+                f" {str(rec.get('label', ''))[:40]} | {no_col} | {yes_col} | {act_col} |"
+            )
+        add("")
+
+    for rec in reversed(records):
+        items = rec.get("comparison", {}).get("not_quantified")
+        if items:
+            add("## Deliberately not quantified")
+            add("")
+            add("These are refused rather than estimated, because a guess would look like a result:")
+            add("")
+            for item in items:
+                add(f"- **{item['claim']}** — `{item['value']}`")
+                add(f"  {item['why']}")
+            add("")
+            break
+
+    add("## Getting real numbers")
+    add("")
+    add("1. Run the same task twice in the host: once normally, once with a scoped allowlist.")
+    add("2. Read the token usage the host itself reports at the end of each run.")
+    add("3. Record it with `router.py measure \"task\" --phase after --actual-tokens <n>`.")
+    add("")
+    add("---")
+    add("")
+    add("_Ledger: `~/.aletheia/ledger.jsonl` · nothing leaves this machine · "
+        "measured ≠ estimated ≠ available_")
+
+    text = "\n".join(lines)
+    if as_text:
+        # Strip Markdown syntax a plain terminal or chat bubble cannot render,
+        # while keeping every heading rule and all column alignment.
+        out = []
+        for line in text.splitlines():
+            line = re.sub(r"^#+\s*", lambda m: "=" * len(m.group(0)) + " ", line)
+            line = re.sub(r"^>\s*", "", line)
+            line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)      # bold
+            line = re.sub(r"`(.+?)`", r"\1", line)             # inline code
+            line = line.replace("_", "")
+            line = re.sub(r"^-\s+", "- ", line)
+            line = re.sub(r"^\|\s*---.*$", "  " + "-" * 40, line)
+            line = re.sub(r"\s*\|\s*", "  ", line)
+            out.append(line.rstrip())
+        text = "\n".join(out)
+    return text
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read-only, local Agent Skills discovery & routing hints")
     parser.add_argument("--version", action="version", version=VERSION)
@@ -2012,10 +2171,12 @@ def main(argv: list[str] | None = None) -> int:
     meas.add_argument("--note", default=None, help="free-text note stored with the record")
     meas.add_argument("--ledger", type=Path, default=None, help="override ledger location")
 
-    rep = sub.add_parser("report", help="summarize the local ledger and export a self-contained HTML comparison")
+    rep = sub.add_parser("report", help="summarize the local ledger as HTML, markdown, or text")
     rep.add_argument("--ledger", type=Path, default=None, help="ledger file to read")
-    rep.add_argument("--out", type=Path, default=None, help="write the HTML report here")
-    rep.add_argument("--json", action="store_true", help="print the summary JSON instead of writing HTML")
+    rep.add_argument("--out", type=Path, default=None, help="write the report here (extension picks the format)")
+    rep.add_argument("--format", choices=("html", "md", "text"), default=None,
+                     help="html = self-contained page; md/text = readable in a chat or terminal")
+    rep.add_argument("--json", action="store_true", help="print the raw summary JSON")
 
     tel = sub.add_parser("telemetry", help="read real token usage from hosts that persist it")
     tel.add_argument("--since-days", type=float, default=None, help="only sessions modified within N days")
@@ -2111,14 +2272,37 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "report":
         records = read_ledger(args.ledger if args.ledger else None)
-        html = render_report_html(records)
         if args.json:
             print(json.dumps({"records": len(records)}, ensure_ascii=False, indent=2))
-            print(html)
+            print(render_report_html(records))
             return 0
-        out = args.out or (Path.cwd() / "aletheia-report.html")
-        out.write_text(html, encoding="utf-8")
-        print(json.dumps({"report": str(out), "records": len(records)}, ensure_ascii=False, indent=2))
+
+        # Three delivery tiers: a URL when the file can be published, the file
+        # itself, or formatted text. The format follows --format, then the
+        # output extension, then HTML as the default.
+        fmt = args.format
+        out = args.out
+        if fmt is None and out is not None:
+            suffix = out.suffix.lower()
+            fmt = {".md": "md", ".markdown": "md", ".txt": "text"}.get(suffix, "html")
+        fmt = fmt or "html"
+
+        if fmt == "md":
+            body = render_report_markdown(records, as_text=False)
+        elif fmt == "text":
+            body = render_report_markdown(records, as_text=True)
+        else:
+            body = render_report_html(records)
+
+        if out is None:
+            # No destination: the point of this tier is to paste it somewhere.
+            print(body)
+            return 0
+
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(body, encoding="utf-8")
+        print(json.dumps({"report": str(out), "format": fmt, "records": len(records)},
+                         ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "inventory":

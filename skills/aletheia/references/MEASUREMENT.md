@@ -123,13 +123,38 @@ confident guess.
 Records append to `~/.aletheia/ledger.jsonl` — **on this machine, never
 uploaded**. A truncated line is skipped rather than breaking the report.
 
+## Delivering a report: three tiers
+
+A report often cannot be published as a URL. That is a delivery problem, not a
+reason to ship something unreadable, so the same data renders three ways:
+
 ```bash
-python scripts/router.py report --out docs/sample-report.html
+# 1 · File (default) — a self-contained page, opens anywhere, offline
+python scripts/router.py report --out report.html
+
+# 2 · Markdown — for pasting into an issue, doc or PR
+python scripts/router.py report --out report.md
+
+# 3 · Plain text — for a chat message or a terminal
+python scripts/router.py report --format text
 ```
 
-The HTML is self-contained: no CDN, no fonts, no network. Measured figures are
-badged green, estimates carry an `est` superscript, and unavailable cells say so
-in words. See `docs/sample-report.html` for a generated example.
+The format follows `--format`, then the output extension (`.html` / `.md` /
+`.txt`), then HTML as the default. With no `--out`, the report is printed to
+stdout — which is the point of the text tier: you paste it and it still reads
+as a document.
+
+**The text tier is still a formatted document**, not a dump: heading rules,
+aligned columns, a provenance legend, and every figure labelled measured,
+estimated or unavailable. Degrading to a bare list of numbers would be a
+downgrade the reader can feel, so it is not offered as a mode.
+
+### HTML is always self-contained
+
+No CDN, no web fonts, no scripts, no network calls of any kind. A report that
+needs the network to render is a report that fails exactly when it matters — on
+an offline machine, in an archived attachment, or behind a corporate proxy. A
+test asserts this, so it cannot regress.
 
 ## Library health: breakage, staleness, redundancy
 

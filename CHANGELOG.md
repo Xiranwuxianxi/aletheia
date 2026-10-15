@@ -4,6 +4,49 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.7.0 — 2026-10-15
+
+Reports gain a third delivery tier, because "can't publish a URL" is a delivery
+problem — not a reason to ship something unreadable.
+
+### Added
+
+- **`report --format html|md|text`**: the same data rendered three ways.
+  - `html` (default) — a self-contained page that opens offline
+  - `md` — for pasting into an issue, doc or PR
+  - `text` — for a chat message or terminal, with Markdown syntax stripped but
+    all column structure, heading rules and provenance labels intact
+- **Format inferred from the output extension** (`.html` / `.md` / `.txt`), so
+  `--out report.md` "just works". With no `--out`, the report prints to stdout —
+  which is the point of the text tier.
+- `docs/sample-report.md` alongside the HTML example.
+
+### Changed
+
+- The text tier is a **formatted document**, not a dump: heading rules, aligned
+  columns, a provenance legend, and every figure labelled measured / estimated /
+  unavailable. Degrading to a bare list of numbers is not offered as a mode.
+
+### Fixed
+
+- **The headline could show em-dashes while a real comparison sat one line
+  above it.** Both renderers read `records[-1]`, but a telemetry record carries
+  no comparison. They now take the newest record that actually has one.
+- **The plain-text tier leaked Markdown syntax** — `**` for bold and backticks
+  survived into the output. Both are now stripped properly rather than by naive
+  character removal.
+
+### Tests
+
+- Assert the HTML report contains no `http://`, `https://`, `<script` or `cdn`:
+  a report that needs the network fails precisely when it matters — offline, in
+  an archived attachment, or behind a proxy. This cannot regress.
+- Assert the text tier keeps its structure and leaks no Markdown.
+- Assert the headline is not blanked out by a trailing telemetry record.
+- Assert an empty ledger renders in all three formats rather than crashing.
+
+62 tests pass.
+
 ## 1.6.0 — 2026-10-15
 
 Aletheia now covers the mainstream agent hosts, not just the two it was built

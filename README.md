@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
-[![Version](https://img.shields.io/badge/version-1.6.0-888780?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.7.0-888780?style=flat-square)](CHANGELOG.md)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -270,6 +270,24 @@ Records stay local in `~/.aletheia/ledger.jsonl`. `report` exports a
 self-contained HTML file — no CDN, no fonts, no network — where measured values
 are badged, estimates carry an `est` marker, and unavailable cells say so in
 words. See [`docs/sample-report.html`](docs/sample-report.html).
+
+### Delivering a report when there is no URL
+
+A report that cannot be published as a link is a delivery problem, not a reason
+to ship something unreadable. The same data renders three ways:
+
+```bash
+python skills/aletheia/scripts/router.py report --out report.html   # file, opens offline
+python skills/aletheia/scripts/router.py report --out report.md     # issue / PR / doc
+python skills/aletheia/scripts/router.py report --format text       # chat or terminal
+```
+
+The format follows `--format`, then the output extension, then HTML. With no
+`--out` the report prints to stdout, ready to paste.
+
+The text tier is a **formatted document, not a dump**: heading rules, aligned
+columns, a provenance legend, and every figure labelled. Bare numbers in a chat
+bubble are not offered as a mode.
 
 ## Keeping the library healthy
 
