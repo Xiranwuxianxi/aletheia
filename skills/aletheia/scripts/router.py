@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 WORD_RE = re.compile(r"[a-z][a-z0-9+-]{1,}|[\u3400-\u9fff]{2,}", re.I)
 # Shared defaults. The CLI and the offline `eval` command must agree, otherwise
@@ -741,6 +741,928 @@ def load_mode_config(path: Path | None) -> dict[str, Any]:
     return config
 
 
+# --- Metering ---------------------------------------------------------------
+# Everything here is a COUNT of something observable on disk. There is no token
+# telemetry on most hosts, so this module never invents one. Fields it cannot
+# measure are recorded as the string "unavailable", never as a plausible number.
+#
+# The distinction is load-bearing:
+#   measured   — read from the filesystem right now, reproducible
+#   estimated  — derived by a documented rule from measured values
+#   unavailable — the host exposes nothing; deliberately left blank
+
+UNAVAILABLE = "unavailable"
+
+# Bytes-per-token by script type. Mixed CJK prose runs ~1.5-2 B/token; English
+# code and JSON run ~3.5-4 B/token. These are conservative midpoints and are
+# always reported as estimates, never as usage.
+TOKEN_BYTES_BY_SCRIPT = {
+    "cjk_mixed": 2.0,
+    "latin_code": 3.5,
+}
+
+LEDGER_DIR_NAME = ".aletheia"
+LEDGER_FILE_NAME = "ledger.jsonl"
+
+
+def ledger_path(base: Path | None = None) -> Path:
+    """Local ledger location. Stays on this machine; never uploaded."""
+    return (base or Path.home()) / LEDGER_DIR_NAME / LEDGER_FILE_NAME
+
+
+def estimate_tokens(chars: int, script: str = "cjk_mixed") -> int:
+    """Convert a measured character count into an estimated token count."""
+    return int(chars / TOKEN_BYTES_BY_SCRIPT.get(script, 2.0))
+
+
+def new_task_id() -> str:
+    return time.strftime("task-%Y%m%dT%H%M%SZ", time.gmtime())
+
+
+def append_ledger(record: dict[str, Any], base: Path | None = None) -> Path:
+    """Append one measurement record. Local file only; no network, no telemetry."""
+    path = ledger_path(base)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return path
+
+
+def read_ledger(base: Path | None = None) -> list[dict[str, Any]]:
+    """Read ledger records. `base` may be a directory or the jsonl file itself."""
+    if base is None:
+        path = ledger_path()
+    elif base.is_file() or base.suffix == ".jsonl":
+        path = base
+    else:
+        path = base / LEDGER_FILE_NAME
+    if not path.is_file():
+        return []
+    records = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except ValueError:
+            continue  # a partially written line must not break reporting
+    return records
+
+
+def measure_routing_cost(
+    task: str,
+    skills: list[Skill],
+    allowed: set[str] | None,
+    top: int = DEFAULT_TOP,
+    threshold: int = DEFAULT_THRESHOLD,
+) -> dict[str, Any]:
+    """Measure the real, reproducible cost of routing this one task.
+
+    All numbers here are derived from files just read. The token figures are
+    `estimated` because bytes-to-tokens is a conversion, not a host reading.
+    """
+    unscoped_chars = sum(len(s.name) + len(s.description) + 40 for s in skills)
+    visible, suppressed = apply_scope(skills, allowed)
+    scoped_chars = sum(len(s.name) + len(s.description) + 40 for s in visible)
+    candidates = route(task, visible, top, threshold)["candidates"]
+    # Only the selected skills' bodies are loaded; rejected ones cost nothing.
+    selected_chars = sum(len(s.description) for s in visible if s.name in {c["name"] for c in candidates})
+
+    return {
+        "task_chars": len(task),
+        "task_tokens_est": estimate_tokens(len(task)),
+        "inventory_visible": len(visible),
+        "inventory_total": len(skills),
+        "metadata_chars_unscoped": unscoped_chars,
+        "metadata_chars_scoped": scoped_chars,
+        "metadata_tokens_est_unscoped": estimate_tokens(unscoped_chars),
+        "metadata_tokens_est_scoped": estimate_tokens(scoped_chars),
+        "metadata_tokens_saved_est": max(0, estimate_tokens(unscoped_chars) - estimate_tokens(scoped_chars)),
+        "candidates": [{"name": c["name"], "score": c["score"]} for c in candidates],
+        "selected_desc_chars": selected_chars,
+        "selected_desc_tokens_est": estimate_tokens(selected_chars),
+        "fields": {
+            "task_tokens": "estimated",
+            "metadata_tokens": "estimated",
+            "host_token_usage": UNAVAILABLE,
+            "host_token_note": (
+                "This host exposes no token telemetry. Actual prompt/completion tokens cannot be "
+                "measured from here; ask the host UI or API response for real usage."
+            ),
+        },
+    }
+
+
+def compare_scenarios(baseline: dict[str, Any], scoped: dict[str, Any]) -> dict[str, Any]:
+    """Compare 'no aletheia' against 'aletheia + scoping'.
+
+    Honest framing matters more than a big number: without routing, an agent
+    either (a) loads every installed skill's metadata, or (b) improvises and may
+    pick the wrong skill and redo the work. Only (a) is measurable here, so only
+    (a) is quantified.
+    """
+    saved = max(0, baseline["metadata_tokens_est_unscoped"] - scoped["metadata_tokens_est_scoped"])
+    ratio = (
+        saved / baseline["metadata_tokens_est_unscoped"] * 100
+        if baseline["metadata_tokens_est_unscoped"] else 0.0
+    )
+    return {
+        "comparison": {
+            "without_aletheia": {
+                "label": "No routing, whole library visible",
+                "metadata_tokens_est": baseline["metadata_tokens_est_unscoped"],
+                "basis": "measured chars -> estimated tokens",
+            },
+            "with_aletheia_scoped": {
+                "label": "Aletheia with an allowlist",
+                "metadata_tokens_est": scoped["metadata_tokens_est_scoped"],
+                "basis": "measured chars -> estimated tokens",
+            },
+            "saved_tokens_est": saved,
+            "saved_percent": round(ratio, 1),
+        },
+        "not_quantified": [
+            {
+                "claim": "tokens saved by not redoing the wrong skill",
+                "value": UNAVAILABLE,
+                "why": "Requires a real A/B run on the same task. The CLI cannot know how much "
+                       "work a wrong skill caused, and guessing would be fabrication.",
+            },
+            {
+                "claim": "actual host token usage with vs without",
+                "value": UNAVAILABLE,
+                "why": "No token telemetry on this host. Read it from the host's own UI or API response.",
+            },
+            {
+                "claim": "money saved",
+                "value": UNAVAILABLE,
+                "why": "Requires a per-token price and a measured billable token count; neither is available here.",
+            },
+        ],
+        "how_to_get_real_numbers": [
+            "Run the same task twice in the host: once normally, once with a scoped allowlist.",
+            "Read the token usage the host reports at the end of each run.",
+            "Record both with: router.py measure --task-id <id> --label <run> --actual-tokens <n>",
+        ],
+    }
+
+
+def render_report_html(records: list[dict[str, Any]]) -> str:
+    """Render a self-contained HTML comparison report.
+
+    Design rule: measured, estimated and unavailable look different, and every
+    estimate carries its basis. A number without a visible provenance label is
+    the thing this project exists to prevent.
+    """
+    if not records:
+        rows = '<tr><td colspan="6" class="empty">No measurements recorded yet.</td></tr>'
+    else:
+        rows = ""
+        for rec in records:
+            with_a = rec.get("with_aletheia", {})
+            without = rec.get("without_aletheia", {})
+            actual = rec.get("actual_tokens", UNAVAILABLE)
+            # A telemetry record has no per-task cost columns; show that honestly
+            # instead of inventing zeros for it.
+            if "metadata_tokens_est_unscoped" in without:
+                no_col = f"{without['metadata_tokens_est_unscoped']:,}"
+                yes_col = f"{with_a.get('metadata_tokens_est_scoped', 0):,}"
+            else:
+                no_col = yes_col = '<span class="na">n/a</span>'
+            actual_cell = (
+                f"{actual:,}" if isinstance(actual, int)
+                else '<span class="na">not measurable here</span>'
+            )
+            label = _esc(rec.get("label", ""))[:44]
+            rows += (
+                "<tr>"
+                f"<td class=\"mono\">{_esc(rec.get('task_id', ''))}</td>"
+                f"<td><span class=\"tag {_esc(rec.get('phase', ''))}\">{_esc(rec.get('phase', ''))}</span></td>"
+                f"<td class=\"mono\">{label}</td>"
+                f"<td class=\"num\">{no_col}<span class=\"est\">est</span></td>"
+                f"<td class=\"num\">{yes_col}<span class=\"est\">est</span></td>"
+                f"<td class=\"num\">{actual_cell}</td>"
+                "</tr>"
+            )
+
+    host_cards = ""
+    telemetry = {}
+    for rec in reversed(records):
+        if rec.get("host_telemetry"):
+            telemetry = rec["host_telemetry"]
+            break
+    for host, info in telemetry.items():
+        label = _esc(info.get("label", host))
+        if info.get("available"):
+            def num(key: str, _info: dict = info) -> str:
+                value = _info.get(key)
+                return f"{value:,}" if isinstance(value, int) else _esc(value)
+
+            host_cards += (
+                '<div class="card measured-card">'
+                f'<h3>{label} <span class="ok">measured</span></h3>'
+                f'<p class="big">{num("total_tokens_including_cache_read")}</p>'
+                f'<p class="why">input {num("input_tokens")} · output {num("output_tokens")}'
+                f' · cache read {num("cache_read_tokens")}'
+                f' · cache write {num("cache_write_tokens")}'
+                f' · {_esc(info.get("messages_with_usage"))} messages across'
+                f' {_esc(info.get("sessions_scanned"))} session file(s)</p>'
+                "</div>"
+            )
+        else:
+            host_cards += (
+                '<div class="card na-card">'
+                f"<h3>{label}</h3><p class=\"na\">unavailable</p>"
+                f'<p class="why">{_esc(info.get("reason", ""))}</p>'
+                "</div>"
+            )
+
+    not_quantified = ""
+    for rec in reversed(records):
+        items = rec.get("comparison", {}).get("not_quantified")
+        if items:
+            not_quantified = "".join(
+                '<div class="card na-card">'
+                f"<h3>{_esc(item['claim'])}</h3>"
+                f'<p class="na">{_esc(item["value"])}</p>'
+                f'<p class="why">{_esc(item["why"])}</p>'
+                "</div>"
+                for item in items
+            )
+            break
+
+    last_cmp = records[-1].get("comparison", {}).get("comparison", {}) if records else {}
+    last_without = records[-1].get("without_aletheia", {}) if records else {}
+    last_with = records[-1].get("with_aletheia", {}) if records else {}
+    without_tokens = last_cmp.get("without_aletheia", {}).get("metadata_tokens_est", "—")
+    with_tokens = last_cmp.get("with_aletheia_scoped", {}).get("metadata_tokens_est", "—")
+    saved = f"{last_cmp['saved_tokens_est']:,}" if "saved_tokens_est" in last_cmp else "—"
+    saved_pct = f"{last_cmp['saved_percent']}%" if "saved_percent" in last_cmp else "—"
+
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Aletheia · routing cost report</title>
+<style>
+:root {{
+  --bg:#fbfaf8; --card:#ffffff; --ink:#1f1d1a; --muted:#6b675f; --faint:#9a958c;
+  --line:#e6e2da; --accent:#534AB7; --accent-soft:#eeedfe;
+  --warn:#BA7517; --warn-soft:#FAEEDA; --na:#8a857c; --na-soft:#f2f0ec;
+  --good:#0F6E56; --good-soft:#E1F5EE;
+}}
+*{{box-sizing:border-box}}
+body{{margin:0;padding:32px 20px;background:var(--bg);color:var(--ink);
+  font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}}
+.wrap{{max-width:940px;margin:0 auto}}
+header{{margin-bottom:28px}}
+h1{{font-size:20px;font-weight:600;margin:0 0 6px;letter-spacing:-.01em}}
+.sub{{color:var(--muted);font-size:13px;margin:0}}
+.brand{{display:inline-flex;align-items:center;gap:8px;margin-bottom:14px}}
+.mark{{width:26px;height:26px;border-radius:7px;background:var(--accent);color:#fff;
+  display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600}}
+.legend{{display:flex;gap:16px;flex-wrap:wrap;margin:20px 0 12px;font-size:12.5px;color:var(--muted)}}
+.legend span{{display:inline-flex;align-items:center;gap:6px}}
+.dot{{width:8px;height:8px;border-radius:50%}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:28px}}
+.stat{{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}}
+.stat .label{{font-size:12.5px;color:var(--muted);margin:0 0 4px}}
+.stat .value{{font-size:26px;font-weight:600;letter-spacing:-.02em}}
+.stat .note{{font-size:11.5px;color:var(--faint);margin:4px 0 0}}
+.good .value{{color:var(--good)}}
+table{{width:100%;border-collapse:collapse;background:var(--card);
+  border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:13px}}
+th{{text-align:left;padding:11px 14px;background:var(--accent-soft);color:var(--accent);
+  font-weight:600;font-size:12px}}
+td{{padding:11px 14px;border-top:1px solid var(--line);vertical-align:top}}
+.num{{text-align:right;font-variant-numeric:tabular-nums}}
+.empty{{text-align:center;color:var(--faint);padding:32px}}
+.mono{{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}}
+.tag{{display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:600}}
+.tag.before{{background:var(--accent-soft);color:var(--accent)}}
+.tag.after{{background:var(--good-soft);color:var(--good)}}
+.est{{font-size:10px;color:var(--faint);margin-left:5px;vertical-align:super}}
+.na{{color:var(--na);background:var(--na-soft);padding:1px 7px;border-radius:5px;font-size:12px}}
+h2{{font-size:15px;font-weight:600;margin:32px 0 12px}}
+.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}}
+.card{{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:15px 17px}}
+.card h3{{font-size:13.5px;margin:0 0 7px;font-weight:600}}
+.card p{{margin:0;font-size:12.5px}}
+.why{{color:var(--muted);margin-top:7px!important}}
+.ok{{font-size:10px;background:var(--good-soft);color:var(--good);padding:2px 7px;border-radius:99px;
+  font-weight:600;vertical-align:middle}}
+.measured-card .big{{font-size:22px;font-weight:600;margin:0 0 4px;color:var(--ink)}}
+.foot{{font-size:12px;color:var(--faint);margin:10px 2px 0}}
+.banner{{background:var(--warn-soft);border:1px solid #EF9F27;border-radius:12px;
+  padding:14px 17px;margin:22px 0;font-size:13px;color:#633806}}
+.banner strong{{color:#412402}}
+footer{{margin-top:34px;padding-top:18px;border-top:1px solid var(--line);
+  font-size:12px;color:var(--faint)}}
+@media print{{body{{background:#fff;padding:0}} .card,.stat,table{{break-inside:avoid}}}}
+</style></head><body><div class="wrap">
+
+<div class="brand"><div class="mark">Α</div>
+<div><h1>Routing cost report</h1>
+<p class="sub">Local ledger · {len(records)} record(s) · generated {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}</p></div></div>
+
+<div class="legend">
+<span><span class="dot" style="background:var(--good)"></span> measured on disk</span>
+<span><span class="dot" style="background:var(--warn)"></span> estimated from measured values</span>
+<span><span class="dot" style="background:var(--na)"></span> unavailable — deliberately blank</span>
+</div>
+
+<div class="grid">
+<div class="stat"><p class="label">Metadata tokens, no routing</p>
+<p class="value">{without_tokens}</p>
+<p class="note">estimated · whole library visible</p></div>
+<div class="stat"><p class="label">Metadata tokens, scoped</p>
+<p class="value">{with_tokens}</p>
+<p class="note">estimated · allowlist applied</p></div>
+<div class="stat good"><p class="label">Reduction</p>
+<p class="value">{saved_pct}</p>
+<p class="note">{saved} tokens estimated saved</p></div>
+<div class="stat"><p class="label">Actual host tokens</p>
+<p class="value" style="font-size:19px;color:var(--na)">see host report</p>
+<p class="note">measured per host, not by this tool</p></div>
+</div>
+
+<div class="banner"><strong>Read this before quoting a number.</strong>
+&nbsp;Metadata figures are <strong>estimates</strong> from a character count divided by a documented
+bytes-per-token constant. They are reproducible and they are <em>not</em> host billing data. This host
+exposes no prompt/completion token counter, so actual usage is left blank rather than guessed.</div>
+
+<table><thead><tr><th>Task</th><th>Phase</th><th>Label</th>
+<th class="num">No routing</th><th class="num">Scoped</th><th class="num">Actual</th></tr></thead>
+<tbody>{rows}</tbody></table>
+
+<h2>Actual host usage, read from session files</h2>
+<div class="cards">{host_cards or '<div class="card"><p class="why">No telemetry recorded yet. Run <span class="mono">router.py telemetry --record &lt;ledger&gt;</span>.</p></div>'}</div>
+<p class="foot">Cache reads are billed far below fresh input, so a blended rate would mislead. These
+raw counts are the honest form; apply your own pricing.</p>
+
+<h2>Deliberately not quantified</h2>
+<div class="cards">{not_quantified or '<div class="card"><p class="why">Record a measurement first.</p></div>'}</div>
+
+<h2>Getting real numbers</h2>
+<div class="card"><ol style="margin:0;padding-left:18px;font-size:13px;color:var(--muted)">
+<li>Run the same task twice in the host: once normally, once with a scoped allowlist.</li>
+<li>Read the token usage the host itself reports at the end of each run.</li>
+<li>Record it: <span class="mono">python skills/aletheia/scripts/router.py measure "task" --phase after --actual-tokens &lt;n&gt;</span></li>
+</ol></div>
+
+<footer>Aletheia · local ledger at <span class="mono">~/.aletheia/ledger.jsonl</span> · nothing leaves this machine ·
+<strong>measured ≠ estimated ≠ available</strong></footer>
+
+</div></body></html>"""
+
+
+def _esc(value: Any) -> str:
+    text = str(value)
+    return (
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    )
+
+
+# --- Cross-agent telemetry --------------------------------------------------
+# Claude Code and Codex both persist real per-message usage in their session
+# jsonl files. WorkBuddy does not. So "measured actual tokens" is available for
+# some hosts and genuinely unavailable for others — which is exactly the split
+# the report has to show rather than paper over.
+
+# Each adapter: where sessions live, and which JSON shapes carry usage.
+# Hosts nest differently: Claude Code puts it at message.usage, Codex at the
+# top level. Both shapes are probed, because guessing wrong yields a confident
+# zero — the exact failure this whole feature must never have.
+TELEMETRY_HOSTS = {
+    "claude": {
+        "label": "Claude Code",
+        "sessions": "~/.claude/projects",
+        "glob": "**/*.jsonl",
+        "usage_paths": (("usage",), ("message", "usage")),
+    },
+    "codex": {
+        "label": "Codex",
+        "sessions": "~/.codex",
+        "glob": "**/*.jsonl",
+        "usage_paths": (("usage",), ("message", "usage")),
+    },
+    "workbuddy": {
+        "label": "WorkBuddy",
+        "sessions": None,  # no token telemetry is persisted
+        "glob": None,
+        "usage_paths": None,
+    },
+}
+
+# How much of a skill's cost is a cache hit; cache reads are far cheaper than
+# fresh input, so a single blended rate would overstate or understate.
+PRICE_HINT = {
+    "fresh_input": "highest cost tier",
+    "cache_read": "much cheaper than fresh input",
+    "output": "highest per-token tier",
+}
+
+
+def _dig(obj: Any, path: tuple[str, ...]) -> dict[str, Any] | None:
+    for key in path:
+        if not isinstance(obj, dict) or key not in obj:
+            return None
+        obj = obj[key]
+    return obj if isinstance(obj, dict) else None
+
+
+def _int(value: Any) -> int:
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def collect_host_usage(
+    base: Path | None = None,
+    since_days: float | None = None,
+    hosts: tuple[str, ...] = ("claude", "codex", "workbuddy"),
+) -> dict[str, Any]:
+    """Read real token usage from every host that persists it.
+
+    Returns a per-host breakdown. A host with no telemetry is present in the
+    result with `available: false` and a reason, so the absence is visible
+    rather than silently omitted.
+    """
+    root = base or Path.home()
+    cutoff = (time.time() - since_days * 86400) if since_days else None
+    out: dict[str, Any] = {}
+
+    for host in hosts:
+        spec = TELEMETRY_HOSTS.get(host)
+        blank = {
+            "available": False,
+            "label": spec["label"] if spec else host,
+            "sessions_scanned": 0,
+            "messages_with_usage": 0,
+            "input_tokens": UNAVAILABLE,
+            "output_tokens": UNAVAILABLE,
+            "cache_read_tokens": UNAVAILABLE,
+            "cache_write_tokens": UNAVAILABLE,
+            "total_tokens_including_cache_read": UNAVAILABLE,
+            "billable_tokens_excluding_cache_read": UNAVAILABLE,
+            "provenance": UNAVAILABLE,
+            "reason": "",
+            "price_note": PRICE_HINT,
+        }
+        if spec is None:
+            blank["reason"] = f"unknown host {host!r}"
+            out[host] = blank
+            continue
+        if not spec["sessions"]:
+            # Always the same keys, so a consumer never has to branch on shape.
+            blank["reason"] = "this host does not persist token usage to disk; read it from its own UI"
+            out[host] = blank
+            continue
+
+        session_root = (root / spec["sessions"].lstrip("~/")).expanduser()
+        totals = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "messages": 0}
+        files = 0
+        shapes = spec["usage_paths"]
+        if session_root.is_dir():
+            for path in session_root.glob(spec["glob"]):
+                try:
+                    if not path.is_file() or cutoff and path.stat().st_mtime < cutoff:
+                        continue
+                except OSError:
+                    continue
+                files += 1
+                try:
+                    with path.open("r", encoding="utf-8", errors="replace") as handle:
+                        for line in handle:
+                            if '"usage"' not in line:
+                                continue
+                            try:
+                                record = json.loads(line)
+                            except ValueError:
+                                continue
+                            usage = None
+                            for candidate_path in shapes:
+                                usage = _dig(record, candidate_path)
+                                if usage is not None:
+                                    break
+                            if not usage:
+                                continue
+                            totals["input"] += _int(usage.get("input_tokens"))
+                            totals["output"] += _int(usage.get("output_tokens"))
+                            totals["cache_read"] += _int(usage.get("cache_read_input_tokens"))
+                            totals["cache_write"] += _int(usage.get("cache_creation_input_tokens"))
+                            totals["messages"] += 1
+                except OSError:
+                    continue
+
+        billable = totals["input"] + totals["output"] + totals["cache_write"]
+        # A host with files but no parseable usage is an unknown, not a zero.
+        measurable = totals["messages"] > 0
+        out[host] = {
+            **blank,
+            "available": measurable,
+            "sessions_scanned": files,
+            "messages_with_usage": totals["messages"],
+            "input_tokens": totals["input"] if measurable else UNAVAILABLE,
+            "output_tokens": totals["output"] if measurable else UNAVAILABLE,
+            "cache_read_tokens": totals["cache_read"] if measurable else UNAVAILABLE,
+            "cache_write_tokens": totals["cache_write"] if measurable else UNAVAILABLE,
+            "total_tokens_including_cache_read": (billable + totals["cache_read"]) if measurable else UNAVAILABLE,
+            "billable_tokens_excluding_cache_read": billable if measurable else UNAVAILABLE,
+            "provenance": "read directly from host session files" if measurable else UNAVAILABLE,
+            "reason": "" if measurable else (
+                "session files found but none contained a parseable usage block; the format may have changed"
+            ),
+        }
+    return out
+
+
+# --- Library audit: breakage, staleness, redundancy --------------------------
+
+# Repairs are deliberately conservative: fix what is provably wrong, never
+# delete. Losing a user's skill to a bot's housekeeping is unforgivable; a
+# rewritten frontmatter that lints cleanly is recoverable and auditable.
+REPAIRABLE = ("missing_frontmatter", "description_too_long", "allowed_tools_list")
+
+
+def _read_safe(path: Path) -> str | None:
+    try:
+        # newline="" keeps CRLF intact, but every comparison below then has to
+        # tolerate "\r". Normalizing here instead makes all callers CRLF-proof.
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def declared_skill_name(path: Path) -> str | None:
+    """Best-effort read of the `name:` field without a full YAML parse.
+
+    Used for identity only. Falls back to the folder name when the frontmatter
+    is unreadable, so a broken skill is still auditable.
+    """
+    text = _read_safe(path)
+    if not text:
+        return None
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for line in lines[1:101]:
+        if line.strip() == "---":
+            break
+        stripped = line.strip()
+        if stripped.startswith("name:"):
+            value = stripped.split(":", 1)[1].strip().strip("\"'")
+            return value or None
+    return None
+
+
+def diagnose_skill(path: Path) -> dict[str, Any]:
+    """Classify one SKILL.md. Returns the failure kind plus whether it is safe to repair."""
+    text = _read_safe(path)
+    if text is None:
+        return {"kind": "unreadable", "repairable": False, "detail": "file could not be read"}
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {
+            "kind": "missing_frontmatter",
+            "repairable": True,
+            "detail": "no opening '---' fence; the skill is invisible to any spec-compliant loader",
+        }
+    end = next((i for i, line in enumerate(lines[1:101], start=1) if line.strip() == "---"), -1)
+    if end < 0:
+        return {"kind": "unclosed_frontmatter", "repairable": False, "detail": "no closing fence in first 100 lines"}
+
+    raw = "\n".join(lines[1:end])
+    try:
+        import yaml  # type: ignore[import-not-found]
+    except ImportError:
+        yaml = None
+
+    if yaml is not None:
+        try:
+            parsed = yaml.safe_load(raw)
+        except Exception as e:  # noqa: BLE001 - yaml raises many types
+            detail = f"{type(e).__name__}: {str(e).splitlines()[0][:120]}"
+            # A block sequence under `allowed-tools` is valid YAML but the wrong
+            # shape for this field. Recognise it, so it gets repaired instead of
+            # being lumped in with genuinely corrupt documents.
+            # `[ \t]*\r?$` matters: under re.M, `$` matches before "\n" but the
+            # "\r" of a CRLF pair would otherwise defeat the match.
+            if isinstance(raw, str) and re.search(r"^allowed-tools:[ \t]*(?:#[^\r\n]*)?\r?$", raw, re.M):
+                block = re.search(r"^allowed-tools:[ \t]*(?:#[^\r\n]*)?\r?\n((?:[ \t]+-[ \t]*.+\r?\n?)+)", raw, re.M)
+                if block:
+                    return {"kind": "allowed_tools_list", "repairable": True, "detail": detail}
+            return {"kind": "invalid_yaml", "repairable": True, "detail": detail}
+        if not isinstance(parsed, dict):
+            return {"kind": "invalid_yaml", "repairable": True, "detail": "frontmatter is not a mapping"}
+        description = parsed.get("description")
+        if isinstance(description, str) and len(description) > 1024:
+            return {
+                "kind": "description_too_long",
+                "repairable": True,
+                "detail": f"description is {len(description)} chars; the spec limit is 1024",
+            }
+        allowed = parsed.get("allowed-tools")
+        if isinstance(allowed, list):
+            return {
+                "kind": "allowed_tools_list",
+                "repairable": True,
+                "detail": "allowed-tools is a YAML list; the spec defines a space-separated string",
+            }
+        return {"kind": "ok", "repairable": False, "detail": ""}
+
+    # Zero-dependency fallback: catch only what is unambiguously broken.
+    for index, line in enumerate(lines[1:end], start=2):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or line[0].isspace():
+            continue
+        if ":" in stripped:
+            key, _, value = stripped.partition(":")
+            if key.strip() == "description" and len(value.strip().strip("\"'")) > 1024:
+                return {
+                    "kind": "description_too_long",
+                    "repairable": True,
+                    "detail": f"description exceeds 1024 chars at line {index}",
+                }
+        else:
+            return {
+                "kind": "invalid_yaml",
+                "repairable": False,
+                "detail": f"line {index} is neither a comment nor a 'key: value' pair",
+            }
+    return {"kind": "ok", "repairable": False, "detail": ""}
+
+
+def repair_skill(path: Path, kind: str) -> tuple[bool, str]:
+    """Apply a conservative, in-place repair. Returns (changed, note)."""
+    text = _read_safe(path)
+    if text is None:
+        return False, "unreadable"
+
+    if kind == "description_too_long":
+        try:
+            import yaml  # type: ignore[import-not-found]
+        except ImportError:
+            return False, "needs PyYAML to rewrite frontmatter safely"
+        lines = text.splitlines()
+        end = next((i for i, line in enumerate(lines[1:101], start=1) if line.strip() == "---"), -1)
+        if end < 0:
+            return False, "no closing fence"
+        parsed = yaml.safe_load("\n".join(lines[1:end])) or {}
+        original = str(parsed.get("description", ""))
+        # Truncate on a character boundary and state plainly that it was cut.
+        parsed["description"] = original[:1000].rstrip() + "…"
+        body = "\n".join(lines[end + 1:])
+        updated = (
+            "---\n"
+            + yaml.safe_dump(parsed, allow_unicode=True, sort_keys=False, default_flow_style=False).rstrip()
+            + "\n---"
+            + ("\n" + body if body.strip() else "\n")
+        )
+        path.write_text(updated, encoding="utf-8")
+        return True, f"truncated description from {len(original)} to 1000 chars"
+
+    if kind == "allowed_tools_list":
+        try:
+            import yaml  # type: ignore[import-not-found]
+        except ImportError:
+            return False, "needs PyYAML to rewrite frontmatter safely"
+        # Windows checkouts are frequently CRLF; a regex written against bare
+        # \n silently fails to match, which looks like "repair did nothing".
+        crlf = "\r\n" in text
+        body = text.replace("\r\n", "\n")
+        # Anchoring at the opening fence avoids the greedy list match eating
+        # text that sits before it.
+        start = body.find("---")
+        if start < 0:
+            return False, "no opening fence"
+        head, _, rest = body[start:].partition("\n")
+        if head.strip() != "---":
+            return False, "unexpected content before the frontmatter"
+        rest_lines = rest.splitlines()
+        # `rest` starts *after* the opening fence, so the closing fence is at
+        # whatever index carries '---'; frontmatter is everything before it.
+        close = next((i for i, line in enumerate(rest_lines) if line.strip() == "---"), -1)
+        if close < 0:
+            return False, "no closing fence"
+        front = rest_lines[:close]
+        front_text = "\n".join(front)
+        # Everything after the closing fence is the body, preserved verbatim.
+        body_text = "\n".join(rest_lines[close + 1:])
+
+        block = re.search(r"^allowed-tools:[ \t]*(?:#[^\r\n]*)?$", front_text, re.M)
+        if block:
+            items = [m.group(1).strip() for m in re.finditer(r"^[ \t]+-[ \t]*(.+?)[ \t]*$", front_text, re.M)]
+            if not items:
+                return False, "no list items found under allowed-tools"
+            joined = " ".join(item.strip("\"'") for item in items)
+            new_front = [
+                f"allowed-tools: {joined}" if line.strip().startswith("allowed-tools:") else line
+                for line in front
+            ]
+            # Drop the original list items; their content moved onto one line.
+            new_front = [
+                line for line in new_front
+                if not re.match(r"^[ \t]+-[ \t]*", line)
+            ]
+            front = new_front
+        else:
+            # Valid YAML, wrong shape: round-trip through the parser.
+            try:
+                import yaml  # type: ignore[import-not-found]
+            except ImportError:
+                return False, "needs PyYAML to rewrite frontmatter safely"
+            try:
+                parsed = yaml.safe_load(front_text) or {}
+            except Exception:  # noqa: BLE001
+                return False, "document does not parse as YAML; repair it by hand"
+            parsed["allowed-tools"] = (
+                " ".join(str(x) for x in parsed["allowed-tools"])
+                if isinstance(parsed.get("allowed-tools"), list)
+                else str(parsed.get("allowed-tools", ""))
+            )
+            front = yaml.safe_dump(
+                parsed, allow_unicode=True, sort_keys=False, default_flow_style=False
+            ).rstrip().splitlines()
+
+        # Rebuild as: opening fence, frontmatter, blank line, closing fence, body.
+        document = "---\n" + "\n".join(front).rstrip() + "\n\n---\n"
+        if body_text.strip():
+            document += "\n" + body_text.rstrip() + "\n"
+        path.write_text(
+            document.replace("\n", "\r\n") if crlf else document,
+            encoding="utf-8",
+            newline="",
+        )
+        return True, "converted allowed-tools to the spec's space-separated string"
+
+    if kind == "missing_frontmatter":
+        # Derive a minimal, valid frontmatter from the folder name.
+        name = path.parent.name
+        if not NAME_RE.fullmatch(name):
+            return False, f"directory name {name!r} cannot be used as a valid skill name"
+        lines = text.splitlines()
+        body = "\n".join(lines).lstrip()
+        # Best-effort description from the first prose line, trimmed to spec.
+        first = next((ln.strip("# ").strip() for ln in body.splitlines() if ln.strip()), "")
+        description = (first[:200] or f"Skill {name}").replace(":", " -").replace('"', "'")
+        updated = f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n"
+        path.write_text(updated, encoding="utf-8")
+        return True, f"synthesised frontmatter from directory name; description derived from the body"
+
+    return False, f"no automatic repair for {kind}"
+
+
+def audit_library(
+    roots: list[Path],
+    unused_days: float = 90.0,
+    fix: bool = False,
+    ledger: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Full-library health check: broken, stale, duplicated, and repairable."""
+    seen: set[str] = set()
+    entries: list[dict[str, Any]] = []
+    by_name: dict[str, list[str]] = {}
+    counts = {"ok": 0, "broken": 0, "blocking": 0, "stale": 0, "duplicate": 0}
+
+    for root in roots:
+        root = root.expanduser()
+        if not root.is_dir() or root.is_symlink():
+            continue
+        for skill_md in _skill_files(root):
+            key = str(skill_md.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            diagnosis = diagnose_skill(skill_md)
+            # Identify by the *declared* name, not the folder. Plugin caches nest
+            # as <vendor>/<plugin>/<version>/SKILL.md, so folder names look like
+            # "5.8.2-wb.39298511.g37a65c0b" — counting those as skills invents
+            # dozens of phantom duplicates.
+            name = declared_skill_name(skill_md) or skill_md.parent.name
+            by_name.setdefault(name, []).append(str(skill_md))
+
+            record: dict[str, Any] = {
+                "name": name,
+                "path": str(skill_md),
+                "status": diagnosis["kind"],
+                "detail": diagnosis["detail"],
+                "repairable": diagnosis["repairable"],
+                "modified_days_ago": None,
+                "stale": False,
+            }
+            try:
+                age_days = (time.time() - skill_md.stat().st_mtime) / 86400
+                record["modified_days_ago"] = round(age_days, 1)
+                record["stale"] = age_days > unused_days
+            except OSError:
+                pass
+
+            if diagnosis["kind"] == "ok":
+                counts["ok"] += 1
+            else:
+                counts["broken"] += 1
+                if not diagnosis["repairable"]:
+                    counts["blocking"] += 1
+            if record["stale"]:
+                counts["stale"] += 1
+
+            if fix and diagnosis["repairable"] and diagnosis["kind"] in REPAIRABLE:
+                changed, note = repair_skill(skill_md, diagnosis["kind"])
+                record["repaired"] = changed
+                record["repair_note"] = note
+                record["status_after"] = diagnose_skill(skill_md)["kind"]
+            entries.append(record)
+
+    duplicates = {n: paths for n, paths in by_name.items() if len(paths) > 1}
+    counts["duplicate"] = len(duplicates)
+
+    blocking = [e for e in entries if e["status"] != "ok" and not e["repairable"]]
+    repairable = [e for e in entries if e["status"] != "ok" and e["repairable"]]
+    stale = [e for e in entries if e["stale"]]
+
+    recommendations: list[dict[str, str]] = []
+    if repairable:
+        recommendations.append({
+            "action": "repair",
+            "target": f"{len(repairable)} skill(s) with recoverable frontmatter problems",
+            "command": "python skills/aletheia/scripts/router.py audit --fix",
+            "why": "These load in some hosts and silently fail in others. Repair rewrites frontmatter only.",
+        })
+    if blocking:
+        recommendations.append({
+            "action": "manual_review",
+            "target": f"{len(blocking)} skill(s) needing a human decision",
+            "command": "python skills/aletheia/scripts/router.py audit --json",
+            "why": "Frontmatter is malformed beyond automatic repair. Open the file and fix, or remove it deliberately.",
+        })
+    if stale:
+        recommendations.append({
+            "action": "review_stale",
+            "target": f"{len(stale)} skill(s) not modified in over {unused_days:g} days",
+            "command": "python skills/aletheia/scripts/router.py audit --unused-days 30",
+            "why": "Stale skills still cost metadata every turn. Narrow or remove them deliberately — nothing is deleted for you.",
+        })
+    if duplicates:
+        recommendations.append({
+            "action": "review_duplicates",
+            "target": f"{len(duplicates)} skill(s) installed in more than one location",
+            "command": "python skills/aletheia/scripts/router.py inventory --limit 1",
+            "why": "Duplicates cost metadata twice. Keep one, but choose deliberately — versions may differ.",
+        })
+
+    return {
+        "scanned": len(entries),
+        "counts": counts,
+        "unused_days_threshold": unused_days,
+        "fix_applied": fix,
+        "broken": [e for e in entries if e["status"] != "ok"],
+        "stale_entries": stale,
+        "duplicates": duplicates,
+        "recommendations": recommendations,
+        "safety_note": (
+            "--fix rewrites frontmatter in place and never deletes a file. Anything it cannot repair "
+            "safely is reported for a human decision instead."
+        ),
+    }
+
+
+def render_audit_text(result: dict[str, Any]) -> str:
+    counts = result["counts"]
+    lines = [
+        "Aletheia library audit",
+        f"  scanned {result['scanned']} skill(s)",
+        f"  healthy {counts['ok']}   broken {counts['broken']} (blocking {counts['blocking']})"
+        f"   stale {counts['stale']}   duplicated {counts['duplicate']}",
+        "",
+    ]
+    broken = result["broken"]
+    if broken:
+        lines.append("Broken skills:")
+        for item in broken[:20]:
+            mark = "fixed" if item.get("repaired") else ("auto-fixable" if item["repairable"] else "manual")
+            lines.append(f"  [{mark}] {item['name']} — {item['detail'][:90]}")
+            if item.get("repair_note"):
+                lines.append(f"           → {item['repair_note']}")
+        if len(broken) > 20:
+            lines.append(f"  … and {len(broken) - 20} more")
+        lines.append("")
+    if result["duplicates"]:
+        lines.append("Installed more than once:")
+        for name, paths in list(result["duplicates"].items())[:10]:
+            lines.append(f"  {name} ×{len(paths)}")
+        lines.append("")
+    if result["recommendations"]:
+        lines.append("Recommended next steps:")
+        for rec in result["recommendations"]:
+            lines.append(f"  · {rec['action']}: {rec['target']}")
+            lines.append(f"      {rec['command']}")
+            lines.append(f"      {rec['why']}")
+    else:
+        lines.append("Nothing needs attention.")
+    lines.append("")
+    lines.append(result["safety_note"])
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read-only, local Agent Skills discovery & routing hints")
     parser.add_argument("--version", action="version", version=VERSION)
@@ -790,7 +1712,111 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--set", dest="new_mode", choices=("auto", "manual"), default=None, help="switch and persist")
     mode.add_argument("--only", action="append", default=[], help="with --set manual: initial allowlist of skill names")
 
+    meas = sub.add_parser("measure", help="record what a routing step actually costs (local ledger, no network)")
+    meas.add_argument("task", help="the task text about to be routed")
+    meas.add_argument("--root", action="append", default=[])
+    meas.add_argument("--only", action="append", default=[], help="allowlist for the scoped scenario")
+    meas.add_argument("--phase", choices=("before", "after"), default="before", help="before = estimate baseline, after = record result")
+    meas.add_argument("--task-id", default=None, help="group before/after records; generated if omitted")
+    meas.add_argument("--label", default=None, help="what this measurement represents, e.g. 'deck-task'")
+    meas.add_argument("--actual-tokens", type=int, default=None, help="ONLY a number you read from the host; never invented")
+    meas.add_argument("--note", default=None, help="free-text note stored with the record")
+    meas.add_argument("--ledger", type=Path, default=None, help="override ledger location")
+
+    rep = sub.add_parser("report", help="summarize the local ledger and export a self-contained HTML comparison")
+    rep.add_argument("--ledger", type=Path, default=None, help="ledger file to read")
+    rep.add_argument("--out", type=Path, default=None, help="write the HTML report here")
+    rep.add_argument("--json", action="store_true", help="print the summary JSON instead of writing HTML")
+
+    tel = sub.add_parser("telemetry", help="read real token usage from hosts that persist it")
+    tel.add_argument("--since-days", type=float, default=None, help="only sessions modified within N days")
+    tel.add_argument("--host", action="append", default=[], help="restrict to a host (claude, codex, workbuddy)")
+    tel.add_argument("--record", type=Path, default=None, help="append this measurement to the ledger")
+    tel.add_argument("--ledger", type=Path, default=None, help="override ledger location")
+
+    aud = sub.add_parser("audit", help="inspect the whole library for breakage, staleness and redundancy")
+    aud.add_argument("--root", action="append", default=[])
+    aud.add_argument("--unused-days", type=float, default=90.0, help="a skill unseen for this long is flagged stale")
+    aud.add_argument("--fix", action="store_true", help="apply safe repairs (rewrites frontmatter only; never deletes)")
+    aud.add_argument("--ledger", type=Path, default=None, help="ledger used to judge how recently a skill was used")
+    aud.add_argument("--json", action="store_true", help="print JSON instead of the human summary")
+
     args = parser.parse_args(argv)
+
+    if args.command == "telemetry":
+        hosts = tuple(args.host) if args.host else ("claude", "codex", "workbuddy")
+        usage = collect_host_usage(since_days=args.since_days, hosts=hosts)
+        payload = {
+            "measured": True,
+            "note": "Read from host session files on disk. Hosts without persisted usage are marked unavailable, not zero.",
+            "hosts": usage,
+        }
+        if args.record:
+            record = {
+                "task_id": f"telemetry-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}",
+                "phase": "after",
+                "label": "host telemetry",
+                "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "host_telemetry": usage,
+                "actual_tokens": UNAVAILABLE,
+                "actual_tokens_source": "host session files, per host",
+                "router_version": VERSION,
+            }
+            append_ledger(record, base=(args.ledger.parent if args.ledger else None))
+            payload["recorded"] = str(args.record)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "audit":
+        roots = [Path(r) for r in args.root] if args.root else default_roots(Path.cwd())
+        result = audit_library(
+            roots,
+            unused_days=args.unused_days,
+            fix=args.fix,
+            ledger=(read_ledger(args.ledger if args.ledger else None)),
+        )
+        if not args.json:
+            print(render_audit_text(result))
+        else:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["counts"]["blocking"] == 0 else 1
+
+    if args.command == "measure":
+        roots = _roots(args)
+        skills, _ = discover(roots)
+        allowed = parse_scope(args.only)
+        cost = measure_routing_cost(args.task, skills, allowed)
+        baseline = measure_routing_cost(args.task, skills, None)
+        task_id = args.task_id or new_task_id()
+        record: dict[str, Any] = {
+            "task_id": task_id,
+            "phase": args.phase,
+            "label": args.label or (args.task[:60] if args.task else ""),
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "with_aletheia": cost,
+            "without_aletheia": baseline,
+            "comparison": compare_scenarios(baseline, cost),
+            "actual_tokens": args.actual_tokens if args.actual_tokens is not None else UNAVAILABLE,
+            "actual_tokens_source": "host-reported" if args.actual_tokens is not None else UNAVAILABLE,
+            "router_version": VERSION,
+        }
+        if args.note:
+            record["note"] = args.note
+        path = append_ledger(record, base=(args.ledger.parent if args.ledger else None))
+        print(json.dumps({"ledger": str(path), **record}, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "report":
+        records = read_ledger(args.ledger if args.ledger else None)
+        html = render_report_html(records)
+        if args.json:
+            print(json.dumps({"records": len(records)}, ensure_ascii=False, indent=2))
+            print(html)
+            return 0
+        out = args.out or (Path.cwd() / "aletheia-report.html")
+        out.write_text(html, encoding="utf-8")
+        print(json.dumps({"report": str(out), "records": len(records)}, ensure_ascii=False, indent=2))
+        return 0
 
     if args.command == "inventory":
         roots = _roots(args)

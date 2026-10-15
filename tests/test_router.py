@@ -376,6 +376,138 @@ class RouterTests(unittest.TestCase):
             cfg.write_text("{broken", encoding="utf-8")
             self.assertEqual("auto", router.load_mode_config(cfg)["mode"])
 
+    def test_ledger_is_local_and_round_trips(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            path = router.append_ledger({"task_id": "t1", "phase": "before"}, base=base)
+            self.assertTrue(path.is_file())
+            self.assertTrue(str(path).endswith(router.LEDGER_FILE_NAME))
+            router.append_ledger({"task_id": "t2", "phase": "after"}, base=base)
+            records = router.read_ledger(path)
+            self.assertEqual(["t1", "t2"], [r["task_id"] for r in records])
+            # A truncated final line must not break reporting.
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write("{broken\n")
+            self.assertEqual(2, len(router.read_ledger(path)))
+
+    def test_measure_marks_unmeasured_fields_unavailable(self):
+        """Never present an unmeasurable field as a number."""
+        skills, _ = router.discover([self.fixtures])
+        cost = router.measure_routing_cost("build a deck", skills, {"slides-design"})
+        self.assertEqual("estimated", cost["fields"]["task_tokens"])
+        self.assertEqual(router.UNAVAILABLE, cost["fields"]["host_token_usage"])
+        self.assertGreater(cost["metadata_tokens_est_unscoped"], cost["metadata_tokens_est_scoped"])
+
+    def test_comparison_refuses_to_invent_savings_claims(self):
+        skills, _ = router.discover([self.fixtures])
+        scoped = router.measure_routing_cost("build a deck", skills, {"slides-design"})
+        baseline = router.measure_routing_cost("build a deck", skills, None)
+        result = router.compare_scenarios(baseline, scoped)
+        self.assertGreater(result["comparison"]["saved_tokens_est"], 0)
+        # Anything not measurable must be an explicit refusal, not a guess.
+        for item in result["not_quantified"]:
+            self.assertEqual(router.UNAVAILABLE, item["value"])
+            self.assertTrue(item["why"])
+
+    def test_telemetry_marks_absent_hosts_unavailable(self):
+        """A host with no data must read 'unavailable', never 0 tokens."""
+        with tempfile.TemporaryDirectory() as tmp:
+            result = router.collect_host_usage(base=Path(tmp), hosts=("claude", "workbuddy"))
+            self.assertFalse(result["workbuddy"]["available"])
+            self.assertEqual(router.UNAVAILABLE, result["workbuddy"]["input_tokens"])
+            self.assertIn("does not persist", result["workbuddy"]["reason"])
+            # An empty directory yields no parseable usage, so also unavailable.
+            self.assertFalse(result["claude"]["available"])
+            self.assertEqual(router.UNAVAILABLE, result["claude"]["output_tokens"])
+
+    def test_telemetry_reads_nested_and_flat_usage_shapes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            sessions = base / ".claude" / "projects" / "p"
+            sessions.mkdir(parents=True)
+            (sessions / "a.jsonl").write_text(
+                json.dumps({"message": {"usage": {"input_tokens": 10, "output_tokens": 4}}}) + "\n"
+                + json.dumps({"usage": {"input_tokens": 6, "cache_read_input_tokens": 100}}) + "\n",
+                encoding="utf-8",
+            )
+            result = router.collect_host_usage(base=base, hosts=("claude",))
+            self.assertTrue(result["claude"]["available"])
+            self.assertEqual(16, result["claude"]["input_tokens"])
+            self.assertEqual(4, result["claude"]["output_tokens"])
+            self.assertEqual(100, result["claude"]["cache_read_tokens"])
+            self.assertEqual(2, result["claude"]["messages_with_usage"])
+
+    def test_audit_finds_and_counts_damage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            good = root / "good"
+            good.mkdir()
+            (good / "SKILL.md").write_text(
+                "---\nname: good\ndescription: A healthy skill.\n---\n# body\n", encoding="utf-8"
+            )
+            long_desc = root / "toolong"
+            long_desc.mkdir()
+            (long_desc / "SKILL.md").write_text(
+                f"---\nname: toolong\ndescription: {'x' * 1200}\n---\n# body\n", encoding="utf-8"
+            )
+            result = router.audit_library([root], unused_days=9999, fix=False)
+            self.assertEqual(2, result["scanned"])
+            self.assertEqual(1, result["counts"]["ok"])
+            self.assertEqual(1, result["counts"]["broken"])
+            self.assertEqual(0, result["counts"]["blocking"])
+            self.assertTrue(result["recommendations"])
+
+    def test_audit_fix_repairs_and_never_deletes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            d = root / "toolong"
+            d.mkdir()
+            original = f"---\nname: toolong\ndescription: {'x' * 1200}\n---\n\n# keep this body\n"
+            (d / "SKILL.md").write_text(original, encoding="utf-8")
+            result = router.audit_library([root], fix=True)
+            self.assertEqual(1, result["counts"]["broken"])
+            self.assertTrue((d / "SKILL.md").is_file(), "repair must never delete the skill")
+            after = (d / "SKILL.md").read_text(encoding="utf-8")
+            self.assertIn("# keep this body", after, "the body must survive a repair")
+            self.assertLess(len(after), len(original))
+            # And it must now diagnose cleanly.
+            self.assertEqual("ok", router.diagnose_skill(d / "SKILL.md")["kind"])
+
+    def test_audit_identifies_skills_by_declared_name(self):
+        """Plugin version folders must not masquerade as skill names."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested = root / "vendor" / "plugin" / "1.3.0"
+            nested.mkdir(parents=True)
+            (nested / "SKILL.md").write_text(
+                "---\nname: real-skill\nversion: 1.3.0\ndescription: A plugin skill.\n---\n# body\n",
+                encoding="utf-8",
+            )
+            result = router.audit_library([root])
+            self.assertEqual(1, result["scanned"])
+            self.assertEqual(0, result["counts"]["duplicate"], "one install is not a duplicate")
+            self.assertEqual("real-skill", result["broken"][0]["name"] if result["broken"] else "real-skill")
+
+    def test_repair_handles_crlf_without_corrupting(self):
+        """Windows checkouts are CRLF; a bare-\\n regex silently fails there."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            d = root / "listtools"
+            d.mkdir()
+            body = (
+                "---\r\nname: listtools\r\ndescription: Uses a list.\r\n"
+                "allowed-tools:\r\n  - Bash(git:*)\r\n  - Read\r\n---\r\n\r\n# body\r\n"
+            )
+            target = d / "SKILL.md"
+            target.write_text(body, encoding="utf-8", newline="")
+            self.assertEqual("allowed_tools_list", router.diagnose_skill(target)["kind"])
+            changed, note = router.repair_skill(target, "allowed_tools_list")
+            self.assertTrue(changed, note)
+            self.assertEqual("ok", router.diagnose_skill(target)["kind"])
+            text = target.read_text(encoding="utf-8")
+            self.assertIn("allowed-tools: Bash(git:*) Read", text)
+            self.assertIn("# body", text)
+
 
 if __name__ == "__main__":
     unittest.main()

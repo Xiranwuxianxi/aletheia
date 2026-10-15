@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Aletheia · routing cost report</title>
+<style>
+:root {
+  --bg:#fbfaf8; --card:#ffffff; --ink:#1f1d1a; --muted:#6b675f; --faint:#9a958c;
+  --line:#e6e2da; --accent:#534AB7; --accent-soft:#eeedfe;
+  --warn:#BA7517; --warn-soft:#FAEEDA; --na:#8a857c; --na-soft:#f2f0ec;
+  --good:#0F6E56; --good-soft:#E1F5EE;
+}
+*{box-sizing:border-box}
+body{margin:0;padding:32px 20px;background:var(--bg);color:var(--ink);
+  font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:940px;margin:0 auto}
+header{margin-bottom:28px}
+h1{font-size:20px;font-weight:600;margin:0 0 6px;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:13px;margin:0}
+.brand{display:inline-flex;align-items:center;gap:8px;margin-bottom:14px}
+.mark{width:26px;height:26px;border-radius:7px;background:var(--accent);color:#fff;
+  display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600}
+.legend{display:flex;gap:16px;flex-wrap:wrap;margin:20px 0 12px;font-size:12.5px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.dot{width:8px;height:8px;border-radius:50%}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:28px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+.stat .label{font-size:12.5px;color:var(--muted);margin:0 0 4px}
+.stat .value{font-size:26px;font-weight:600;letter-spacing:-.02em}
+.stat .note{font-size:11.5px;color:var(--faint);margin:4px 0 0}
+.good .value{color:var(--good)}
+table{width:100%;border-collapse:collapse;background:var(--card);
+  border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:13px}
+th{text-align:left;padding:11px 14px;background:var(--accent-soft);color:var(--accent);
+  font-weight:600;font-size:12px}
+td{padding:11px 14px;border-top:1px solid var(--line);vertical-align:top}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.empty{text-align:center;color:var(--faint);padding:32px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.tag{display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:600}
+.tag.before{background:var(--accent-soft);color:var(--accent)}
+.tag.after{background:var(--good-soft);color:var(--good)}
+.est{font-size:10px;color:var(--faint);margin-left:5px;vertical-align:super}
+.na{color:var(--na);background:var(--na-soft);padding:1px 7px;border-radius:5px;font-size:12px}
+h2{font-size:15px;font-weight:600;margin:32px 0 12px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:15px 17px}
+.card h3{font-size:13.5px;margin:0 0 7px;font-weight:600}
+.card p{margin:0;font-size:12.5px}
+.why{color:var(--muted);margin-top:7px!important}
+.ok{font-size:10px;background:var(--good-soft);color:var(--good);padding:2px 7px;border-radius:99px;
+  font-weight:600;vertical-align:middle}
+.measured-card .big{font-size:22px;font-weight:600;margin:0 0 4px;color:var(--ink)}
+.foot{font-size:12px;color:var(--faint);margin:10px 2px 0}
+.banner{background:var(--warn-soft);border:1px solid #EF9F27;border-radius:12px;
+  padding:14px 17px;margin:22px 0;font-size:13px;color:#633806}
+.banner strong{color:#412402}
+footer{margin-top:34px;padding-top:18px;border-top:1px solid var(--line);
+  font-size:12px;color:var(--faint)}
+@media print{body{background:#fff;padding:0} .card,.stat,table{break-inside:avoid}}
+</style></head><body><div class="wrap">
+
+<div class="brand"><div class="mark">Α</div>
+<div><h1>Routing cost report</h1>
+<p class="sub">Local ledger · 2 record(s) · generated 2026-10-15 09:06 UTC</p></div></div>
+
+<div class="legend">
+<span><span class="dot" style="background:var(--good)"></span> measured on disk</span>
+<span><span class="dot" style="background:var(--warn)"></span> estimated from measured values</span>
+<span><span class="dot" style="background:var(--na)"></span> unavailable — deliberately blank</span>
+</div>
+
+<div class="grid">
+<div class="stat"><p class="label">Metadata tokens, no routing</p>
+<p class="value">—</p>
+<p class="note">estimated · whole library visible</p></div>
+<div class="stat"><p class="label">Metadata tokens, scoped</p>
+<p class="value">—</p>
+<p class="note">estimated · allowlist applied</p></div>
+<div class="stat good"><p class="label">Reduction</p>
+<p class="value">—</p>
+<p class="note">— tokens estimated saved</p></div>
+<div class="stat"><p class="label">Actual host tokens</p>
+<p class="value" style="font-size:19px;color:var(--na)">see host report</p>
+<p class="note">measured per host, not by this tool</p></div>
+</div>
+
+<div class="banner"><strong>Read this before quoting a number.</strong>
+&nbsp;Metadata figures are <strong>estimates</strong> from a character count divided by a documented
+bytes-per-token constant. They are reproducible and they are <em>not</em> host billing data. This host
+exposes no prompt/completion token counter, so actual usage is left blank rather than guessed.</div>
+
+<table><thead><tr><th>Task</th><th>Phase</th><th>Label</th>
+<th class="num">No routing</th><th class="num">Scoped</th><th class="num">Actual</th></tr></thead>
+<tbody><tr><td class="mono">task-20261015T085435Z</td><td><span class="tag before">before</span></td><td class="mono">Q3 deck baseline</td><td class="num">33,891<span class="est">est</span></td><td class="num">355<span class="est">est</span></td><td class="num"><span class="na">not measurable here</span></td></tr><tr><td class="mono">telemetry-20261015T085501Z</td><td><span class="tag after">after</span></td><td class="mono">host telemetry</td><td class="num"><span class="na">n/a</span><span class="est">est</span></td><td class="num"><span class="na">n/a</span><span class="est">est</span></td><td class="num"><span class="na">not measurable here</span></td></tr></tbody></table>
+
+<h2>Actual host usage, read from session files</h2>
+<div class="cards"><div class="card measured-card"><h3>Claude Code <span class="ok">measured</span></h3><p class="big">2,870,358</p><p class="why">input 58 · output 8,951 · cache read 2,377,969 · cache write 483,380 · 29 messages across 2 session file(s)</p></div><div class="card measured-card"><h3>Codex <span class="ok">measured</span></h3><p class="big">276</p><p class="why">input 180 · output 96 · cache read 0 · cache write 0 · 1 messages across 141 session file(s)</p></div><div class="card na-card"><h3>WorkBuddy</h3><p class="na">unavailable</p><p class="why">this host does not persist token usage to disk; read it from its own UI</p></div></div>
+<p class="foot">Cache reads are billed far below fresh input, so a blended rate would mislead. These
+raw counts are the honest form; apply your own pricing.</p>
+
+<h2>Deliberately not quantified</h2>
+<div class="cards"><div class="card na-card"><h3>tokens saved by not redoing the wrong skill</h3><p class="na">unavailable</p><p class="why">Requires a real A/B run on the same task. The CLI cannot know how much work a wrong skill caused, and guessing would be fabrication.</p></div><div class="card na-card"><h3>actual host token usage with vs without</h3><p class="na">unavailable</p><p class="why">No token telemetry on this host. Read it from the host's own UI or API response.</p></div><div class="card na-card"><h3>money saved</h3><p class="na">unavailable</p><p class="why">Requires a per-token price and a measured billable token count; neither is available here.</p></div></div>
+
+<h2>Getting real numbers</h2>
+<div class="card"><ol style="margin:0;padding-left:18px;font-size:13px;color:var(--muted)">
+<li>Run the same task twice in the host: once normally, once with a scoped allowlist.</li>
+<li>Read the token usage the host itself reports at the end of each run.</li>
+<li>Record it: <span class="mono">python skills/aletheia/scripts/router.py measure "task" --phase after --actual-tokens &lt;n&gt;</span></li>
+</ol></div>
+
+<footer>Aletheia · local ledger at <span class="mono">~/.aletheia/ledger.jsonl</span> · nothing leaves this machine ·
+<strong>measured ≠ estimated ≠ available</strong></footer>
+
+</div></body></html>

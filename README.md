@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
-[![Version](https://img.shields.io/badge/version-1.4.0-888780?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.5.0-888780?style=flat-square)](CHANGELOG.md)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -212,6 +212,66 @@ Rules: declare steps before starting · count only finished steps · advance at
 stage boundaries, not every message · **no ETA field exists** · 100% means
 verified · omit the bar for small tasks.
 
+## Measuring what it actually costs
+
+```bash
+python skills/aletheia/scripts/router.py telemetry
+python skills/aletheia/scripts/router.py measure "export Q3 to PDF" --only excel-xlsx --phase before
+python skills/aletheia/scripts/router.py report --out report.html
+```
+
+Real token usage is read from the hosts that persist it:
+
+| Host | Telemetry | Source |
+| --- | --- | --- |
+| Claude Code | **measured** | `~/.claude/projects/**/*.jsonl` |
+| Codex | **measured** | `~/.codex/**/*.jsonl` |
+| WorkBuddy | `unavailable` | nothing persisted; read its own UI |
+
+A host with no telemetry reads **`unavailable`, never `0`** — a zero would be a
+claim, and it would be wrong. Cache reads are listed separately from fresh input
+because they cost a fraction of it.
+
+**What is refused rather than estimated:**
+
+| Claim | Why not |
+| --- | --- |
+| Tokens saved by not redoing a wrong skill | Needs a real A/B run on the same task |
+| Actual usage with vs without | No telemetry on that host |
+| Money saved | Needs a price and a measured billable count |
+
+`--actual-tokens` is only ever a number **you** read from the host. The tool will
+not derive it.
+
+Records stay local in `~/.aletheia/ledger.jsonl`. `report` exports a
+self-contained HTML file — no CDN, no fonts, no network — where measured values
+are badged, estimates carry an `est` marker, and unavailable cells say so in
+words. See [`docs/sample-report.html`](docs/sample-report.html).
+
+## Keeping the library healthy
+
+```bash
+python skills/aletheia/scripts/router.py audit            # report
+python skills/aletheia/scripts/router.py audit --fix      # repair what is provably broken
+python scripts/daily_check.py                             # daily, read-only
+```
+
+On a real 300-skill library this finds breakage a routing check never would:
+
+```text
+Library: 550 scanned · 539 healthy · 11 broken (0 need a human) · 10 stale · 216 duplicated
+```
+
+`--fix` repairs an over-long `description`, an `allowed-tools` list, and missing
+frontmatter. **It never deletes a skill** — anything it cannot repair safely is
+reported for a human decision instead. Stale and duplicated skills are flagged,
+not removed: those calls are yours.
+
+`scripts/daily_check.py` runs the same audit plus a telemetry sample, appends to
+a rotating local log, and exits non-zero only when a human decision is needed —
+so Task Scheduler or cron can alert on it. Scheduling recipes are in
+[`references/MEASUREMENT.md`](skills/aletheia/references/MEASUREMENT.md).
+
 ## Session scoping
 
 Keep the whole skill library out of a focused task's context:
@@ -296,10 +356,11 @@ candidate's `SKILL.md` before deciding.
 ├── skills/aletheia/
 │   ├── SKILL.md                   # spec-compliant entry point
 │   ├── scripts/router.py          # read-only discovery, scope, lint, eval, context, progress
-│   └── references/                # TRANSPARENCY · PROGRESS · ROUTING_POLICY · SECURITY · CONTEXT · EXAMPLES
+│   └── references/                # TRANSPARENCY · PROGRESS · BUTLER · MEASUREMENT · ROUTING_POLICY · SECURITY · CONTEXT · EXAMPLES
 ├── prompts/MASTER_PROMPT.en.md    # full resident prompt (English)
 ├── prompts/MASTER_PROMPT.zh-CN.md # full resident prompt (Chinese)
 ├── scripts/install.py             # non-destructive installer
+├── scripts/daily_check.py         # daily health check (read-only by default)
 ├── examples/                      # session scope manifest
 ├── tests/                         # unit tests, fixtures, bilingual eval cases
 ├── docs/                          # ARCHITECTURE · EVALUATION · RELEASE_CHECKLIST

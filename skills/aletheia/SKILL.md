@@ -12,7 +12,7 @@ description: >-
 license: MIT
 compatibility: Requires filesystem access for the optional Python 3.10+ discovery helper; skill selection works manually with a host-provided skills list when filesystem or Python is unavailable.
 metadata:
-  version: "1.4.0"
+  version: "1.5.0"
   category: meta-routing
 ---
 
@@ -240,6 +240,7 @@ Read further only when required:
 - `references/PROGRESS.md` — the four progress states, when to update, anti-patterns.
 - `references/SCOPE_CONTROL.md` — choosing which skills to enable, and what that saves.
 - `references/BUTLER.md` — the full library inventory, auto/manual modes, numbered selection.
+- `references/MEASUREMENT.md` — token telemetry per host, before/after comparison, audits and repairs.
 - `references/ROUTING_POLICY.md` — tie breaking, sequential and parallel combinations, edge cases.
 - `references/SECURITY.md` — trust, injection, authorization and high-impact operations.
 - `references/CONTEXT_AND_SUBAGENTS.md` — token efficiency and delegation.

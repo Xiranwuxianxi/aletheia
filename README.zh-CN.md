@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
-[![Version](https://img.shields.io/badge/version-1.4.0-888780?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.5.0-888780?style=flat-square)](CHANGELOG.md)
 
 [English](README.md) · **简体中文**
 
@@ -195,6 +195,61 @@ python skills/aletheia/scripts/router.py progress \
 规则：开始前先声明步骤 · 只计已完成步骤 · 在阶段边界更新而不是每条消息 ·
 **不存在 ETA 字段** · 100% 意味着已验证 · 小任务直接不显示进度条。
 
+## 真实消耗：只报测得到的数
+
+```bash
+python skills/aletheia/scripts/router.py telemetry
+python skills/aletheia/scripts/router.py measure "导出 Q3 财报" --only excel-xlsx --phase before
+python skills/aletheia/scripts/router.py report --out report.html
+```
+
+真实 token 用量直接从**持久化了遥测的宿主**读取：
+
+| 宿主 | 遥测 | 来源 |
+| --- | --- | --- |
+| Claude Code | **实测** | `~/.claude/projects/**/*.jsonl` |
+| Codex | **实测** | `~/.codex/**/*.jsonl` |
+| WorkBuddy | `unavailable` | 未持久化，请读它自己的 UI |
+
+没有遥测的主机显示 **`unavailable`，绝不是 `0`** —— 0 是一个断言，而且会是错的。
+cache read 单独列出而不并入总数，因为它便宜得多。
+
+**明确拒绝估算的项**：
+
+| 说法 | 为什么不给 |
+| --- | --- |
+| 避免选错 skill 重做省下的 token | 需要同一任务真实 A/B 对照 |
+| 用与不用的实际用量差 | 该宿主没有遥测 |
+| 省钱金额 | 需要单价和实测可计费 token |
+
+`--actual-tokens` 只能填**你从宿主读到的**数字，工具不会自己推算。
+
+记录只存在本机 `~/.aletheia/ledger.jsonl`。`report` 导出**自包含** HTML —— 无 CDN、无字体、无网络，
+实测值带标记、估算值标 `est`、不可测的格子直接写明原因。见
+[`docs/sample-report.html`](docs/sample-report.html)。
+
+## 技能库健康维护
+
+```bash
+python skills/aletheia/scripts/router.py audit            # 只报告
+python skills/aletheia/scripts/router.py audit --fix      # 修复能确定的损坏
+python scripts/daily_check.py                             # 每日体检，只读
+```
+
+在真实 300+ skill 的库上，它能发现路由检查永远发现不了的问题：
+
+```text
+Library: 550 scanned · 539 healthy · 11 broken (0 need a human) · 10 stale · 216 duplicated
+```
+
+`--fix` 会修复超长 `description`、列表式 `allowed-tools`、缺失 frontmatter。
+**它绝不删除任何 skill** —— 修不了的会列出来等你决定。陈旧和重复只标记不删除：
+留不留是你的判断。
+
+`scripts/daily_check.py` 跑同样的审计加一次遥测采样，写入轮转的本机日志，
+只在需要人工判断时才返回非零退出码，方便 Task Scheduler 或 cron 报警。
+配置方法见 [`references/MEASUREMENT.md`](skills/aletheia/references/MEASUREMENT.md)。
+
 ## 会话级技能作用域
 
 别把整个技能库拖进一个聚焦任务的上下文里：
@@ -275,10 +330,11 @@ python -m unittest discover -s tests -v
 ├── skills/aletheia/
 │   ├── SKILL.md                   # 规范入口
 │   ├── scripts/router.py          # 只读发现、作用域、lint、eval、context、进度
-│   └── references/                # TRANSPARENCY · PROGRESS · ROUTING_POLICY · SECURITY · CONTEXT · EXAMPLES
+│   └── references/                # TRANSPARENCY · PROGRESS · BUTLER · MEASUREMENT · ROUTING_POLICY · SECURITY · CONTEXT · EXAMPLES
 ├── prompts/MASTER_PROMPT.zh-CN.md # 完整常驻提示词（中文）
 ├── prompts/MASTER_PROMPT.en.md    # 完整常驻提示词（英文）
 ├── scripts/install.py             # 非破坏式安装器
+├── scripts/daily_check.py         # 每日体检（默认只读）
 ├── examples/                      # 会话作用域清单示例
 ├── tests/                         # 单元测试、fixtures、双语评测案例
 ├── docs/                          # ARCHITECTURE · EVALUATION · RELEASE_CHECKLIST
