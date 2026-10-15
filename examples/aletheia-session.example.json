@@ -1,0 +1,9 @@
+{
+  "_comment": "Optional session scope. Place this file in your project root to restrict Aletheia routing to the skills this task actually needs. Delete the file (or widen `only`) to restore full routing. Not a security boundary: host-mandated skills still run.",
+  "only": [
+    "slides-design",
+    "image-creation",
+    "pdf-processing"
+  ],
+  "note": "Example: deck + image + PDF work only."
+}

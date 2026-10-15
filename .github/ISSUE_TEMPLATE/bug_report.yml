@@ -1,0 +1,25 @@
+name: Skill routing bug
+about: Report a reproducible mismatch or skipped invocation
+labels: [bug]
+body:
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: Which skill(s) should have been used, and why?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and evidence
+      description: Include redacted metadata, task, host/platform and observed invocation evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Redact secrets, personal information and private files.
+    validations:
+      required: true

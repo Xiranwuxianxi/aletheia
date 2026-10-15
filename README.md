@@ -1,0 +1,356 @@
+<div align="center">
+
+# Α Aletheia
+
+**Unconcealment for agent skill routing.**
+*Route to the right skill — and show your work while you do it.*
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
+[![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
+[![Version](https://img.shields.io/badge/version-1.4.0-888780?style=flat-square)](CHANGELOG.md)
+
+**English** · [简体中文](README.zh-CN.md)
+
+</div>
+
+---
+
+Aletheia (Ἀλήθεια) is the Greek principle of **unconcealment** — truth as that
+which is *not hidden*. It is the precise antonym of a black box, which is
+exactly the problem this project solves: agents that silently pick a skill, run
+something, and hand you a result you cannot audit.
+
+Aletheia routes tasks to the right installed skills **and makes the routing
+visible**: what was considered, what was rejected and why, what actually ran,
+what was verified, and what was not. It stops and asks before anything
+irreversible or outward-facing.
+
+## Why
+
+Three failure modes show up again and again in agent work:
+
+| Failure | What it looks like | Aletheia's answer |
+| --- | --- | --- |
+| **Silent selection** | A specialized skill existed, but the agent improvised from general knowledge | Mandatory preflight + candidate disclosure |
+| **Wrong pick** | The agent matched on keywords and grabbed the wrong skill | Show rejected candidates and the reason |
+| **Unauditable execution** | "Done." — with no trace of what ran or what was checked | Five-stage trail: intent → candidates → decision → operations → verdict |
+
+Plus the two that make long sessions painful: **drifting context** and
+**skill-library noise**.
+
+## What you get
+
+- **A butler over your whole library** — knows every installed skill, in personal dirs *and* plugin caches
+- **You decide who chooses** — autonomous by default, or take over and pick by number; chosen once, switches in one sentence
+- **Visible routing** — five disclosure stages, including *rejected* candidates
+- **Countable progress** — a bar that reports finished steps out of a declared total, in four states, with no invented ETA
+- **Stop gates** — confirmation before destructive, outward-facing, financial or
+  ambiguous actions; never gate on harmless local reads
+- **Session scoping** — run only the skills this task needs, not the whole library
+- **Context pressure** — measured transcript bytes, graded tiers, and the exact
+  `/compact` or `/new` command for your host
+- **Read-only CLI** — stdlib-only inventory, discovery, routing, scope, progress and offline eval
+
+## Install
+
+```bash
+git clone https://github.com/Xiranwuxianxi/aletheia.git
+cd aletheia
+
+# Install into a target project and enable the always-on routing hook
+python scripts/install.py --platform both --scope project --project /path/to/my-project --bootstrap
+
+# Or into your personal directory
+python scripts/install.py --platform both --scope user --bootstrap
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--platform` | `codex` / `claude` / `both` |
+| `--scope` | `project` (in-repo) or `user` (personal) |
+| `--dry-run` | Preview every write before it happens |
+| `--force` | Back up a differing install before replacing it |
+| `--bootstrap` | Add/update the marked routing block in `AGENTS.md` / `CLAUDE.md` — only when you pass it |
+
+The installer refuses to overwrite conflicting files by default. `--bootstrap`
+only edits its own marked block; your existing rules are preserved. Try
+`--dry-run` first.
+
+<details>
+<summary><b>Route B — install just the skill</b></summary>
+
+Copy `skills/aletheia/` into wherever your agent looks for skills:
+
+| Agent | Project level | Personal level |
+| --- | --- | --- |
+| Codex | `.agents/skills/aletheia/` | `~/.agents/skills/aletheia/` |
+| Claude Code | `.claude/skills/aletheia/` | `~/.claude/skills/aletheia/` |
+
+Then add one line to your project instructions:
+
+> Before each substantive task, assess installed skills and use aletheia to select, read and actually apply relevant skills before execution.
+
+</details>
+
+## Transparency in practice
+
+A real trace, compressed:
+
+```text
+Tracing: export the quarterly workbook to PDF
+Skills considered:
+  pdf-processing   selected — owns PDF output
+  slides-design    rejected — wrong artifact type
+  image-creation   rejected — scope mismatch
+Operations:
+  1. router.py route "export quarterly workbook to PDF"  → pdf-processing (52)
+  2. read skills/pdf-processing/SKILL.md                 → 214 lines
+  3. [GATE] overwrite Q3-report.pdf (2.1 MB, 3 days old)? → user chose "write v2"
+  4. write Q3-report-v2.pdf                              → 12 pages, 1.8 MB
+Evidence: file opens, 12/12 pages present, sha256 recorded
+Not verified: visual fidelity against the original workbook
+```
+
+**Rejected candidates are mandatory.** Showing only what you picked hides the
+most useful signal — whether a better option was silently passed over.
+
+### Stop gates
+
+```text
+This will overwrite Q3-report.pdf (2.1 MB, modified 3 days ago).
+  1 · Overwrite in place
+  2 · Write Q3-report-v2.pdf and keep both   ← recommended
+```
+
+Gates fire for destructive, outward-facing, financial and ambiguous actions.
+They do **not** fire for reading files, searching or running tests —
+over-gating trains people to approve without reading.
+
+## The butler: who chooses
+
+Pick the mode **once**, at install:
+
+```bash
+# Autonomous (default): Aletheia decides, and shows what it rejected and why
+python scripts/install.py --platform both --scope project --bootstrap --mode auto
+
+# Owner-driven: Aletheia offers numbered candidates and waits for you
+python scripts/install.py --platform both --scope project --bootstrap --mode manual
+```
+
+Either way the five-stage disclosure still applies — manual mode changes *who
+decides*, not *what must be visible*.
+
+Switch any time, no reinstall:
+
+```bash
+python skills/aletheia/scripts/router.py mode --set manual   # you take over
+python skills/aletheia/scripts/router.py mode --set auto     # hand it back
+```
+
+Or just say it: *"你自己选"* / *"我自己选"* / *"换个状态"*.
+
+### Answer by number
+
+With a large library, listing everything would be unusable — so filter first:
+
+```bash
+python skills/aletheia/scripts/router.py inventory --query "quarterly deck" --limit 12
+```
+
+```text
+Which skills should I use? Reply with a number, several (2,5), 'all', or 'none'.
+
+ 1. guizang-ppt-skill   editable PPTX generation
+ 2. excel-xlsx         spreadsheet read/write
+ 3. baoyu-slide-deck   image-rich slide decks
+```
+
+`3` single · `2 5` multiple · `all` everything listed · `none` no skill, just do
+the task. Numbers are **per-invocation** — after an install they change, so the
+list is always re-shown rather than reusing stale numbers.
+
+### How much can it actually see?
+
+```bash
+python skills/aletheia/scripts/router.py inventory --limit 1
+```
+
+Discovery covers personal skill directories *and* nested plugin caches
+(`<vendor>/<plugin>/<version>/SKILL.md`), and reports both installed and unique
+counts. A `name` that differs from its folder — common with marketplace
+suffixes like `foo__skillhub` — is reported as a **warning, not dropped**;
+dropping those would hide real skills from routing.
+
+## Progress you can trust
+
+```text
+[████████████░░░░░░░░░░░░]  50%  2/4  → writing report
+```
+
+A progress bar is the easiest thing in an agent UI to turn into a lie. Aletheia
+renders progress as **finished steps out of a declared total** — nothing else.
+
+| State | Means | Bar |
+| --- | --- | --- |
+| `working` | Steps are advancing right now | Filled to the current step |
+| `blocked` | **Waiting on your decision** — not an error | Filled to the stall point |
+| `failed` | Cannot proceed | Filled to where it stopped |
+| `done` | All steps finished **and verified** | Full, `✓ N/total` |
+
+`blocked` is deliberately distinct from `failed`. Waiting at a confirmation gate
+is a healthy pause; rendering it as an error trains people to panic-click.
+
+```bash
+python skills/aletheia/scripts/router.py progress \
+  "gather sources" "read SKILL.md" "write report" "verify output" \
+  --done 2 --current "writing report"
+```
+
+Rules: declare steps before starting · count only finished steps · advance at
+stage boundaries, not every message · **no ETA field exists** · 100% means
+verified · omit the bar for small tasks.
+
+## Session scoping
+
+Keep the whole skill library out of a focused task's context:
+
+```bash
+# One invocation
+python skills/aletheia/scripts/router.py route "make a deck" --root skills --only slides-design
+
+# Whole session — drop aletheia-session.json in the project root
+{ "only": ["slides-design", "image-creation"] }
+```
+
+`--only` overrides the manifest; both present means intersect. Withheld skills
+are reported as `suppressed_skills` — never silently dropped. Scoping is a
+**routing filter, not a security boundary**.
+
+## Context pressure
+
+```bash
+python skills/aletheia/scripts/router.py context \
+  --transcripts ~/.workbuddy/workspace/sessions --host workbuddy
+```
+
+| Tier | Est. use | Action | Claude Code | Codex | WorkBuddy |
+| --- | --- | --- | --- | --- | --- |
+| `ok` | <70% | Continue | — | — | — |
+| `notice` | 70–85% | Compact first | `/compact` | `/compact` | `/compact` |
+| `trim` | 85–100% | Compact now | `/compact` | `/compact` | `/compact` |
+| `new_session` | ≥100% | Switch, with a handoff | `/clear` | `/new` | `/new` |
+
+> **Honesty note.** Unless your host exposes real token telemetry, this reports
+> `is_measured_context_percentage: false`. The figure is estimated from
+> on-disk transcript bytes against an assumed window. Aletheia never presents an
+> estimate as a measurement.
+
+Before switching sessions, write a handoff: goal, completed steps, key findings,
+open questions, and the exact file paths in play.
+
+## CLI
+
+```bash
+# Full registry with numbers, filterable
+python skills/aletheia/scripts/router.py inventory --query "pdf" --limit 20
+
+# Who chooses: show, or switch and persist
+python skills/aletheia/scripts/router.py mode
+python skills/aletheia/scripts/router.py mode --set manual
+
+# Discover skills in conventional locations
+python skills/aletheia/scripts/router.py scan --json
+
+# Retrieve candidates with reasons
+python skills/aletheia/scripts/router.py route "analyze this spreadsheet" --top 5
+
+# Validate frontmatter in a skills tree
+python skills/aletheia/scripts/router.py lint --root skills
+
+# Offline retrieval benchmark against bundled fixtures
+python skills/aletheia/scripts/router.py eval --root tests/fixtures --cases tests/eval_cases.json
+
+# Session scoping
+python skills/aletheia/scripts/router.py route "make a deck" --root skills --only slides-design
+
+# Context pressure
+python skills/aletheia/scripts/router.py context --transcripts <dir> --host claude
+
+# Progress bar over a declared step list
+python skills/aletheia/scripts/router.py progress "read" "write" "verify" --done 1
+
+# Tests
+python -m unittest discover -s tests -v
+```
+
+`route` never executes a discovered skill. The `score` is a hand-tuned ordering
+signal — not a probability, not a success rate, and not calibrated. Read the
+candidate's `SKILL.md` before deciding.
+
+## Project layout
+
+```text
+.
+├── skills/aletheia/
+│   ├── SKILL.md                   # spec-compliant entry point
+│   ├── scripts/router.py          # read-only discovery, scope, lint, eval, context, progress
+│   └── references/                # TRANSPARENCY · PROGRESS · ROUTING_POLICY · SECURITY · CONTEXT · EXAMPLES
+├── prompts/MASTER_PROMPT.en.md    # full resident prompt (English)
+├── prompts/MASTER_PROMPT.zh-CN.md # full resident prompt (Chinese)
+├── scripts/install.py             # non-destructive installer
+├── examples/                      # session scope manifest
+├── tests/                         # unit tests, fixtures, bilingual eval cases
+├── docs/                          # ARCHITECTURE · EVALUATION · RELEASE_CHECKLIST
+└── .github/workflows/ci.yml       # Python 3.10 / 3.12 / 3.13
+```
+
+## Design principles
+
+- **Standards, not vendor formats** — plain `SKILL.md` + `references/` + `scripts/`
+- **Two-level discovery** — host inventory first, local metadata second
+- **Human/agent split** — the CLI improves recall and auditability; the agent owns semantics, authorization and execution
+- **Honest telemetry** — estimates are labelled as estimates, always
+- **Low context cost** — metadata first, full text only when selected
+- **Safe defaults** — one-level scan, symlinks refused, no code execution
+
+## Honest limits
+
+**No ordinary SKILL.md or system prompt can guarantee correct skill invocation
+on every request.** Aletheia improves hit rate and auditability, and only if the
+target agent can actually reach those skills and tools. The CLI is a read-only
+candidate retriever — it does not replace the host's skill API, permissions or
+executor. There is no verified public benchmark for this yet; the bundled
+fixtures are a smoke test, not an accuracy claim.
+
+## FAQ
+
+**Why not scan every folder on the machine?**
+Full-disk recursion is unsafe, slow, and surfaces skills irrelevant to the
+current runtime. Only host-registered, user-specified or conventional
+directories are scanned.
+
+**Can it auto-invoke plugin or cloud-only skills?**
+Only when the host exposes both the list and a real invocation mechanism. File
+scanning does not substitute for a plugin interface.
+
+**Will `--bootstrap` overwrite my AGENTS.md?**
+No. It only upserts its own marked block. Run `--dry-run` first to see exactly
+what changes.
+
+**Does a high score mean it's safe to use?**
+No. A score is a lexical ordering signal with no probability meaning and no
+calibration. Read the candidate's `SKILL.md`, then decide.
+
+## References
+
+- [Agent Skills specification](https://agentskills.io/specification)
+- [Claude Code skills](https://code.claude.com/docs/en/skills)
+- [OpenAI API Skills](https://developers.openai.com/api/docs/guides/tools-skills)
+- [OpenAI skills examples](https://github.com/openai/skills)
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+Contributions welcome: [CONTRIBUTING.md](CONTRIBUTING.md) · [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) · [SECURITY.md](SECURITY.md)

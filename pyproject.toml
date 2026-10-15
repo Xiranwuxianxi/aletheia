@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aletheia"
+version = "1.4.0"
+description = "Portable read-only skill discovery helper and open Agent Skills orchestration instructions"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["agent-skills", "skill-router", "agents", "codex", "claude-code"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+# No runtime dependencies on purpose: the CLI is stdlib-only so it can run in a
+# locked-down or air-gapped environment. PyYAML is optional and only improves
+# frontmatter parsing (see skills/aletheia/scripts/router.py).
+dependencies = []
+
+[project.optional-dependencies]
+yaml = ["PyYAML>=6.0"]
+dev = ["PyYAML>=6.0", "ruff>=0.5"]
+
+[project.urls]
+Homepage = "https://github.com/Xiranwuxianxi/aletheia"
+Documentation = "https://github.com/Xiranwuxianxi/aletheia/blob/main/README.md"
+Issues = "https://github.com/Xiranwuxianxi/aletheia/issues"
+Changelog = "https://github.com/Xiranwuxianxi/aletheia/blob/main/CHANGELOG.md"
+
+[tool.setuptools]
+# Ships the skill bundle and helper scripts as data; there is no importable
+# package, so nothing is listed under [tool.setuptools.packages].
+py-modules = []
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

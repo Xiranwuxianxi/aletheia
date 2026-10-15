@@ -1,0 +1,110 @@
+[
+  {
+    "id": "pdf-cn",
+    "task": "帮我处理一个PDF文件，把每页内容总结一下",
+    "expect": [
+      "pdf-processing"
+    ]
+  },
+  {
+    "id": "pdf-en",
+    "task": "Merge two .pdf files into one",
+    "expect": [
+      "pdf-processing"
+    ]
+  },
+  {
+    "id": "sheet-cn",
+    "task": "请分析Excel表格中的营收数据",
+    "expect": [
+      "spreadsheet-analysis"
+    ]
+  },
+  {
+    "id": "sheet-en",
+    "task": "Audit the formulas in this XLSX workbook",
+    "expect": [
+      "spreadsheet-analysis"
+    ]
+  },
+  {
+    "id": "research-cn",
+    "task": "帮我网络调研并查资料核对来源",
+    "expect": [
+      "web-research"
+    ]
+  },
+  {
+    "id": "research-en",
+    "task": "Research online sources using web search",
+    "expect": [
+      "web-research"
+    ]
+  },
+  {
+    "id": "negative",
+    "task": "早上好",
+    "expect": []
+  },
+  {
+    "id": "slides-cn",
+    "task": "帮我生成PPT演示文稿，制作漂亮的幻灯片",
+    "expect": [
+      "slides-design"
+    ]
+  },
+  {
+    "id": "slides-en",
+    "task": "Create an editable PowerPoint presentation deck",
+    "expect": [
+      "slides-design"
+    ]
+  },
+  {
+    "id": "code-cn",
+    "task": "请对我的GitHub代码仓库做代码审查",
+    "expect": [
+      "code-review"
+    ]
+  },
+  {
+    "id": "code-en",
+    "task": "Review this GitHub pull request for bugs",
+    "expect": [
+      "code-review"
+    ]
+  },
+  {
+    "id": "image-cn",
+    "task": "给我的视频做一张海报封面图片",
+    "expect": [
+      "image-creation"
+    ]
+  },
+  {
+    "id": "combo-sheet-deck",
+    "task": "先分析Excel表格，再制作PowerPoint PPT演示文稿",
+    "expect": [
+      "spreadsheet-analysis",
+      "slides-design"
+    ]
+  },
+  {
+    "id": "combo-research-deck",
+    "task": "Research online sources, then create an editable PowerPoint presentation",
+    "expect": [
+      "web-research",
+      "slides-design"
+    ]
+  },
+  {
+    "id": "negative-translation",
+    "task": "will not 有缩写吗",
+    "expect": []
+  },
+  {
+    "id": "negative-casual",
+    "task": "谢谢你，晚安",
+    "expect": []
+  }
+]
