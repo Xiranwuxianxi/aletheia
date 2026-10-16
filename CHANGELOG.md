@@ -4,6 +4,34 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.8.1 — 2026-10-16
+
+A test bug, caught by CI, that could only ever fail on Linux.
+
+### Fixed
+
+- **`test_paths_are_handled_with_both_separators` asserted the impossible.** It
+  built a path and swapped `/` for `\`, expecting discovery to find the skill.
+  That is true on Windows, where both separators work. On Linux `\` is an
+  ordinary filename character, so `\tmp\...` is simply not a path — the test was
+  asserting that nonsense resolves correctly. The test now branches on `os.name`:
+  forward slashes must work everywhere, the escaped form is asserted only on
+  Windows, and on POSIX a backslash path must resolve to **nothing** rather than
+  quietly matching something unintended.
+
+  No production code changed. `router.py` was correct on both platforms.
+
+### Tests
+
+- A structural guard now requires any test that manipulates path separators to
+  branch on `os.name`. Verified to fire: neutralising those branches makes the
+  suite fail, restoring them makes it pass.
+- The lesson is recorded in the guard's docstring: a test that passes only on
+  the author's machine is worse than no test, because it reports confidence it
+  has not earned.
+
+73 tests pass.
+
 ## 1.8.0 — 2026-10-16
 
 Adds Hermes and OpenClaw, and fixes two portability bugs that only CI could see.

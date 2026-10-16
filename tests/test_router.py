@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 import re
 import tempfile
 import unittest
@@ -681,6 +682,29 @@ class RouterTests(unittest.TestCase):
                              .get(suffix, "html"))
         self.assertEqual(cases[".md"], "md")
 
+    def test_tests_do_not_assert_platform_specific_input_universally(self):
+        """Guard against the trap that cost two CI rounds.
+
+        A test that builds a path with one separator and expects the other to
+        work passes on Windows and fails on Linux, because '\\' is a legal
+        filename character on POSIX but not a separator. Any test touching
+        separators must branch on `os.name`.
+        """
+        source = (ROOT / "tests" / "test_router.py").read_text(encoding="utf-8")
+        # Find assertions that pair a replace() with a separator swap.
+        separator_tests = re.findall(
+            r'def (test_[a-z_]*separator[a-z_]*)\(', source
+        )
+        for name in separator_tests:
+            start = source.index(f"def {name}(")
+            body = source[start : source.find("\n    def ", start + 10)]
+            if "os.name" not in body:
+                self.fail(f"{name} manipulates path separators but never checks os.name")
+        self.assertIn(
+            "test_paths_are_handled_with_both_separators", separator_tests,
+            "the separator test should exist and be discoverable by this guard",
+        )
+
     def test_skill_md_sections_are_not_nested_by_accident(self):
         """A demoted '##' silently buries routing rules under an unrelated topic.
 
@@ -763,7 +787,13 @@ class RouterTests(unittest.TestCase):
                 self.assertIn("# body", raw)
 
     def test_paths_are_handled_with_both_separators(self):
-        """Relative and native paths must resolve to the same skill."""
+        """A path typed the other common way must still resolve.
+
+        On Windows both separators are accepted, because Windows itself treats
+        '/' as a separator. On POSIX, '\\' is an ordinary filename character —
+        `\\tmp\\x` is not a path at all — so only the native form is asserted
+        there. Asserting otherwise would demand the impossible.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             d = root / "pdf-processing"
@@ -774,11 +804,23 @@ class RouterTests(unittest.TestCase):
             )
             direct, _ = router.discover([d])
             self.assertEqual(["pdf-processing"], [s.name for s in direct])
-            # A path carrying backslashes must still work on POSIX, and a POSIX
-            # path on Windows, because users type both.
-            for variant in (str(d).replace("/", "\\"), str(d).replace("\\", "/")):
+
+            native = str(d)
+            # Forward slashes are the portable form and must work everywhere.
+            variants = [native.replace("\\", "/")]
+            if os.name == "nt":
+                # Windows additionally accepts the escaped-separator form.
+                variants.append(native.replace("/", "\\"))
+            for variant in variants:
                 skills, _ = router.discover([Path(variant)])
                 self.assertEqual(["pdf-processing"], [s.name for s in skills], variant)
+
+            if os.name != "nt":
+                # A backslash path is not a path on POSIX. It must resolve to
+                # nothing rather than silently matching something unintended.
+                bogus = native.replace("/", "\\")
+                skills, _ = router.discover([Path(bogus)])
+                self.assertEqual([], [s.name for s in skills], bogus)
 
     def test_sqlite_reading_is_readonly_and_portable(self):
         """SQLite is stdlib, so hosts storing usage there are readable everywhere.
