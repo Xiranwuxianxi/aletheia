@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
-[![Version](https://img.shields.io/badge/version-1.9.0-888780?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.10.0-888780?style=flat-square)](CHANGELOG.md)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -419,6 +419,62 @@ The scoping saving, measured from the files rather than modelled:
 whole library: 44,322 est. tokens of metadata
 scoped to 2:       347 est. tokens        — a 99.2% reduction
 ```
+
+## Knowing when there is an update
+
+```bash
+python skills/aletheia/scripts/router.py update          # is this skill current?
+python skills/aletheia/scripts/router.py update --scan   # and every other skill?
+python skills/aletheia/scripts/router.py update --no-fetch   # offline: local state only
+```
+
+```text
+local_version 1.9.0 · local_tag v1.9.0 · branch main
+latest_tag    v1.9.0 · update_available false
+```
+
+When something is newer it tells you what, and stops there:
+
+```text
+UPDATE AVAILABLE: v1.9.0 -> v1.10.0
+3 commit(s) behind
+  45209d4 Fix the Chinese README, a duplicated changelog entry, and stale caches
+  ...
+```
+
+### It detects. It never applies.
+
+There is no `--apply`, and a test enforces that. **Rewriting a `SKILL.md` that
+another agent is mid-read is a bad trade** — the reader gets a half-written file
+and you did not ask for that risk. The command hands you the decision:
+
+```bash
+git log HEAD..origin/main --oneline    # read what changed, first
+git pull --ff-only origin main
+python -m unittest discover -s tests   # verify before trusting it
+```
+
+### Update detection needs tags, so the repository has them
+
+Comparing versions requires something to compare against. `v1.8.0` through
+`v1.9.0` are tagged, and a test fails if the current version is not — a
+release-capable repository that cannot detect its own updates is a contradiction.
+
+### Most skills have no upstream, and this says so
+
+```bash
+python skills/aletheia/scripts/router.py update --scan
+```
+
+```text
+252 unique skills · 2 with a git upstream · 250 with none recorded
+```
+
+That is the honest state of a typical library: a skill dropped into
+`~/.agents/skills/` has no record of where it came from, so nothing can check it
+for updates. The scan reports the gap instead of guessing a URL. **250 skills
+without provenance is a finding, not a bug** — it tells you which ones will
+silently go stale.
 
 ## Keeping the library healthy
 

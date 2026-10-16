@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
-[![Version](https://img.shields.io/badge/version-1.9.0-888780?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.10.0-888780?style=flat-square)](CHANGELOG.md)
 
 [English](README.md) · **简体中文**
 
@@ -377,6 +377,58 @@ context cost: 44,322 est. tokens 元数据
 全库:  44,322 est. tokens 元数据
 限 2 个:   347 est. tokens        —— 省 99.2%
 ```
+
+## 知道什么时候有更新
+
+```bash
+python skills/aletheia/scripts/router.py update          # 自己是不是最新版？
+python skills/aletheia/scripts/router.py update --scan   # 其他 skill 呢？
+python skills/aletheia/scripts/router.py update --no-fetch   # 离线：只看本地状态
+```
+
+```text
+local_version 1.9.0 · local_tag v1.9.0 · branch main
+latest_tag    v1.9.0 · update_available false
+```
+
+有新版时会告诉你变了什么，**然后停下**：
+
+```text
+UPDATE AVAILABLE: v1.9.0 -> v1.10.0
+落后 3 个 commit
+  45209d4 修复中文 README、重复的 CHANGELOG 条目、陈旧缓存
+  ...
+```
+
+### 只检测，绝不自动改
+
+**没有 `--apply`，而且有测试强制这一点。**
+改写一个别的 agent 正在读的 `SKILL.md` 是笔糟糕的买卖——读的人会拿到写了一半的文件，
+而你并没有要求承担这个风险。命令把决定权交回给你：
+
+```bash
+git log HEAD..origin/main --oneline    # 先看清楚改了什么
+git pull --ff-only origin main
+python -m unittest discover -s tests   # 验证后再信任
+```
+
+### 更新检测依赖 tag，所以仓库补齐了 tag
+比版本需要可比对的锚点。`v1.8.0` 到 `v1.9.0` 都已打 tag，
+并且有测试在当前版本未打 tag 时失败——**一个不能自我检测更新的可发布仓库是矛盾的**。
+
+### 大部分 skill 没有上游记录，而它如实这么说
+
+```bash
+python skills/aletheia/scripts/router.py update --scan
+```
+
+```text
+252 个唯一 skill · 2 个有 git 上游 · 250 个无记录
+```
+
+这是一个普通技能库的真实状态：被丢进 `~/.agents/skills/` 的 skill 没有来源记录，
+所以**没有任何东西能替它检查更新**。扫描如实报出这个缺口，而不是猜一个 URL。
+**250 个没有来源记录的 skill 是一个发现，不是 bug**——它告诉你哪些会悄悄变陈旧。
 
 ## 技能库健康维护
 

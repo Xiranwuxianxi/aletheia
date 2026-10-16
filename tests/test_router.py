@@ -889,6 +889,98 @@ class RouterTests(unittest.TestCase):
                 self.assertNotIn("overrides the others", text, f"{doc} still says override")
                 self.assertNotIn("优先于清单", text, f"{doc} still says override")
 
+    def test_update_check_never_applies_anything(self):
+        """Detection only. This is the whole point of the command's design.
+
+        Rewriting a SKILL.md that another agent is reading is a bad trade, so
+        there is deliberately no --apply. Guard it structurally.
+        """
+        import subprocess
+
+        help_text = subprocess.run(
+            [sys.executable, "-B", str(ROOT / "skills/aletheia/scripts/router.py"), "update", "--help"],
+            capture_output=True, text=True, cwd=str(ROOT),
+        ).stdout
+        self.assertNotIn("--apply", help_text)
+        self.assertNotIn("--install", help_text)
+        self.assertNotIn("--force", help_text)
+
+        source = (ROOT / "skills/aletheia/scripts/router.py").read_text(encoding="utf-8")
+        # The helper must be read-only: only ls-remote, log, describe, status.
+        for forbidden in ('"pull"', '"push"', '"fetch"', '"checkout"', '"merge"', '"reset"'):
+            self.assertNotIn(
+                f"_git(root, {forbidden}", source,
+                "update detection must never invoke a mutating git command",
+            )
+
+    def test_update_check_reports_unknown_rather_than_guessing(self):
+        """No network, no tags, or no repo must all read as unknown."""
+        with tempfile.TemporaryDirectory() as tmp:
+            result = router.check_update(repo=Path(tmp))   # not a git repo
+            self.assertFalse(result["checked"])
+            self.assertEqual(router.UNAVAILABLE, result["update_available"])
+            self.assertIn("not inside a git repository", result["reason"])
+
+            # A real repo, but with the network explicitly off.
+            result = router.check_update(repo=ROOT, fetch=False)
+            self.assertTrue(result["checked"])
+            self.assertEqual(router.UNAVAILABLE, result["update_available"])
+            self.assertIn("--no-fetch", result["reason"])
+
+    def test_update_check_compares_tags_on_this_repository(self):
+        """The project's own repository must be self-describing.
+
+        Without tags there is nothing to compare a version against, which is the
+        state this project was in until v1.8.0.
+        """
+        import subprocess
+
+        tags = subprocess.run(
+            ["git", "-C", str(ROOT), "tag", "-l"],
+            capture_output=True, text=True,
+        ).stdout.split()
+        self.assertTrue(tags, "the repository needs at least one tag for update detection to work")
+        self.assertIn(f"v{router.VERSION}", tags, "the current version must be tagged")
+
+        result = router.check_update(repo=ROOT, fetch=False)
+        self.assertTrue(result["checked"])
+        # `describe` reports the nearest reachable tag, which may be behind HEAD
+        # while fixes are unreleased — that is normal and must not be an error.
+        self.assertTrue(str(result["local_tag"]).startswith("v"), result["local_tag"])
+        self.assertLessEqual(
+            router._parse_version(result["local_tag"]),
+            router._parse_version(router.VERSION),
+            "the nearest tag must not be ahead of the declared version",
+        )
+
+    def test_upstream_scan_reports_a_gap_rather_than_inventing_one(self):
+        """Most third-party skills carry no upstream. Say so; do not fabricate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            d = root / "orphan"
+            d.mkdir()
+            (d / "SKILL.md").write_text(
+                "---\nname: orphan\ndescription: A skill with no recorded origin.\n---\n# body\n",
+                encoding="utf-8",
+            )
+            result = router.scan_upstreams(roots=[root])
+            self.assertEqual(1, result["total_unique_skills"])
+            self.assertEqual(1, result["no_upstream_recorded"])
+            row = result["skills"][0]
+            self.assertFalse(row["in_git_repo"])
+            self.assertEqual(router.UNAVAILABLE, row["upstream"])
+            self.assertTrue(row["upstream_reason"])
+
+    def test_installations_lists_where_the_skill_lives(self):
+        """A skill in several host directories is normal, not a problem."""
+        found = router.find_installations("aletheia")
+        # At minimum the repository working copy counts.
+        self.assertTrue(found, "the repository's own skills/aletheia must be found")
+        self.assertTrue(
+            any("(this repository)" in host for host in found),
+            f"the working copy should be reported separately from installs: {list(found)}",
+        )
+
     def test_chinese_readme_has_no_untranslated_fragments(self):
         """Catch half-translated prose before a reader does.
 

@@ -4,6 +4,69 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.10.0 — 2026-10-16
+
+Update detection, and an honest accounting of what cannot be updated at all.
+
+### Added
+
+- **`update` subcommand**: compares this checkout against its remote and reports
+  whether something is newer. `--scan` extends that to every installed skill,
+  listing which have a reachable upstream and which do not; `--no-fetch` reports
+  local state without touching the network.
+- **Git tags for `v1.8.0` through `v1.10.0`**, each pointing at the commit that
+  actually shipped that version. Update detection compares versions, so it needs
+  something to compare against — and a repository that cannot detect its own
+  updates cannot honestly claim to be maintainable. A test fails if the current
+  version is untagged.
+- **`daily_check.py` reports update status**, and exits non-zero when an update
+  is available, so the existing scheduler surfaces it without configuration.
+- Both READMEs document the feature in full.
+
+### Design: detection only, no `--apply`
+
+There is deliberately no way to make this command change a file. Rewriting a
+`SKILL.md` that another agent is currently reading is a bad trade — the reader
+gets a half-written file, and the user never asked for that risk. A test
+enforces the absence of `--apply`, `--install` and `--force`, and checks that the
+git helper is never called with a mutating subcommand.
+
+When an update exists the output hands over the decision:
+
+```bash
+git log HEAD..origin/main --oneline    # read what changed, first
+git pull --ff-only origin main
+python -m unittest discover -s tests   # verify before trusting it
+```
+
+### Measured on this machine
+
+```text
+252 unique skills · 2 with a git upstream · 250 with none recorded
+```
+
+**Most skills cannot be checked for updates at all**, because nothing records
+where they came from. A skill dropped into `~/.agents/skills/` has no origin
+URL, no version field, no manifest. The scan reports that gap rather than
+guessing a repository — **250 skills without provenance is a finding, not a
+bug**, and it identifies exactly which ones will silently go stale.
+
+### Honesty constraints
+
+- No network, no tags, or not a repository all report `update_available:
+  "unavailable"` with a stated reason. None of them report `false`, because
+  "no update" and "could not check" are different claims.
+- A non-tagged version is not treated as an error; `git describe` reporting a
+  tag behind HEAD is normal while fixes are unreleased.
+
+### Fixed
+
+- `check_update` accepted any path and let git walk upward to an unrelated
+  repository, so a directory that was not a repo at all still passed every git
+  call. An explicit path must now actually contain `.git`.
+
+90 tests pass. lint `ok: true`, eval 16/16.
+
 ## Unreleased
 
 Fixes from a review of v1.9.0. No version bump: these are corrections to

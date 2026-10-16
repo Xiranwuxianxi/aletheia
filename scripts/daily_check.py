@@ -72,7 +72,8 @@ def append_log(lines: list[str]) -> None:
     LOG_FILE.write_text("\n".join(kept) + "\n", encoding="utf-8")
 
 
-def build_summary(audit: dict, telemetry: dict, active: dict | None = None) -> str:
+def build_summary(audit: dict, telemetry: dict, active: dict | None = None,
+                  update: dict | None = None) -> str:
     counts = audit["counts"]
     hosts = telemetry.get("hosts", {})
     readable = [h for h, v in hosts.items() if v.get("available")]
@@ -102,6 +103,26 @@ def build_summary(audit: dict, telemetry: dict, active: dict | None = None) -> s
     if missing:
         lines.append(f"No token telemetry: {', '.join(missing)} — read from that host's own UI.")
     lines.append("These totals cover the scanned session files only, not all historical usage.")
+
+    if update is not None:
+        lines.append("")
+        lines.append("Update check:")
+        if not update.get("checked"):
+            lines.append(f"  not checked: {update.get('reason', 'unknown')}")
+        elif update.get("update_available") is True:
+            lines.append(
+                f"  UPDATE AVAILABLE: {update.get('local_tag') or update.get('local_version')}"
+                f" -> {update.get('latest_tag')}"
+            )
+            if isinstance(update.get("commits_behind"), int):
+                lines.append(f"  {update['commits_behind']} commit(s) behind")
+            for line in (update.get("commits_preview") or [])[:5]:
+                lines.append(f"    {line}")
+        elif update.get("update_available") is False:
+            lines.append(f"  up to date: {update.get('latest_tag')} ({update.get('local_version')})")
+        else:
+            lines.append(f"  unknown: {update.get('reason', 'no reason given')}")
+        lines.append("  Aletheia detects updates but never applies them — that stays your call.")
 
     if active:
         totals = active["token_totals"]
@@ -175,19 +196,28 @@ def main() -> int:
     except ValueError:
         active = None
 
+    # `update` compares this checkout against its remote. Detection only: it
+    # never fetches into the working tree or rewrites a file.
+    _, upd_out = run_router("update")
+    try:
+        update = json.loads(upd_out)
+    except ValueError:
+        update = {"checked": False, "reason": "update check produced no readable output"}
+
     _, tel_out = run_router("telemetry", "--since-days", "30")
     try:
         telemetry = json.loads(tel_out)
     except ValueError:
         telemetry = {"hosts": {}}
 
-    summary = build_summary(audit, telemetry, active)
+    summary = build_summary(audit, telemetry, active, update)
     append_log([summary, "", f"audit exit code: {code}"])
 
-    needs_attention = bool(audit["recommendations"])
+    needs_attention = bool(audit["recommendations"]) or update.get("update_available") is True
     if args.json:
         print(json.dumps(
-            {"audit": audit, "telemetry": telemetry, "active_measurement": active},
+            {"audit": audit, "telemetry": telemetry, "active_measurement": active,
+             "update": update},
             ensure_ascii=False, indent=2,
         ))
     elif args.quiet and not needs_attention:

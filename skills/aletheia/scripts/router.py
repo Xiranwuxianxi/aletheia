@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.9.0"
+VERSION = "1.10.0"
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 WORD_RE = re.compile(r"[a-z][a-z0-9+-]{1,}|[\u3400-\u9fff]{2,}", re.I)
 # Shared defaults. The CLI and the offline `eval` command must agree, otherwise
@@ -2616,6 +2616,243 @@ def fail(message: str, code: int = 2) -> int:
     return code
 
 
+# --- Update detection -------------------------------------------------------
+# Detection only. It reports what is out there and stops there.
+#
+# Updating a skill that another agent is currently reading is a bad trade: the
+# reader gets a half-written file, and the user did not ask for that risk. So
+# there is deliberately no `--apply` here. The command tells you what changed
+# and where; the update itself stays a human decision, the same way every other
+# destructive action in this project does.
+
+UPDATE_REPO = "https://github.com/Xiranwuxianxi/aletheia"
+
+
+def _git(repo: Path, *args: str, timeout: int = 12) -> tuple[int, str]:
+    """Run a read-only git command. Never raises; returns (code, output)."""
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True, text=True, timeout=timeout,
+            errors="replace",
+        )
+    except FileNotFoundError:
+        return 127, "git not found on PATH"
+    except subprocess.TimeoutExpired:
+        return 124, f"git timed out after {timeout}s"
+    except Exception as e:  # noqa: BLE001
+        return 1, f"{type(e).__name__}: {e}"
+    return proc.returncode, (proc.stdout or proc.stderr or "").strip()
+
+
+def _repo_root(start: Path | None = None) -> Path | None:
+    """Find the repository this skill lives in, if it is inside one."""
+    here = (start or Path(__file__).resolve()).resolve()
+    for candidate in [here, *here.parents]:
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _parse_version(text: str) -> tuple[int, ...]:
+    match = re.search(r"v?(\d+(?:\.\d+)*)", text)
+    return tuple(int(p) for p in match.group(1).split(".")) if match else ()
+
+
+def _fetch_remote_tags(repo: Path) -> tuple[dict[str, str], str]:
+    """Read remote tags via `git ls-remote`. Returns (tag->commit, error)."""
+    code, out = _git(repo, "ls-remote", "--tags", "origin")
+    if code != 0:
+        return {}, out or f"git ls-remote failed ({code})"
+    tags: dict[str, str] = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        sha, ref = parts
+        name = ref.rsplit("/", 1)[-1]
+        if name.endswith("^{}"):       # annotated tag points here
+            name = name[:-3]
+        tags[name] = sha
+    return tags, ""
+
+
+def check_update(
+    repo: Path | None = None, fetch: bool = True
+) -> dict[str, Any]:
+    """Compare this checkout against its remote. Reports; never modifies."""
+    root = repo or _repo_root()
+    # An explicit path must actually be a repository root. Without this check a
+    # directory inside some unrelated repo passes every git call, because git
+    # walks upward looking for .git.
+    if root is None or not (root / ".git").exists():
+        return {
+            "checked": False,
+            "reason": "this skill copy is not inside a git repository, so there is no "
+                      "upstream to compare against",
+            "local_version": VERSION,
+            "latest_version": UNAVAILABLE,
+            "update_available": UNAVAILABLE,
+        }
+
+    result: dict[str, Any] = {"checked": True, "repo": str(root), "local_version": VERSION}
+
+    code, remote = _git(root, "remote", "get-url", "origin")
+    result["remote"] = remote if code == 0 else UNAVAILABLE
+    if code != 0:
+        result["reason"] = "no git remote named origin"
+
+    code, head = _git(root, "rev-parse", "--short", "HEAD")
+    result["local_commit"] = head if code == 0 else UNAVAILABLE
+    code, branch = _git(root, "rev-parse", "--abbrev-ref", "HEAD")
+    result["branch"] = branch if code == 0 else UNAVAILABLE
+
+    # Which tag is this checkout sitting on, if any?
+    code, describe = _git(root, "describe", "--tags", "--abbrev=0")
+    result["local_tag"] = describe if code == 0 else UNAVAILABLE
+    code, dirty = _git(root, "status", "--porcelain")
+    result["uncommitted_changes"] = len([l for l in dirty.splitlines() if l.strip()]) if code == 0 else None
+
+    if not fetch:
+        result["latest_tag"] = UNAVAILABLE
+        result["latest_version"] = UNAVAILABLE
+        result["update_available"] = UNAVAILABLE
+        result["reason"] = "remote not contacted (--no-fetch)"
+        return result
+
+    tags, error = _fetch_remote_tags(root)
+    if error:
+        # No network, auth failure, or a repo without tags. Say which.
+        result["latest_tag"] = UNAVAILABLE
+        result["latest_version"] = UNAVAILABLE
+        result["update_available"] = UNAVAILABLE
+        result["reason"] = f"could not read remote tags: {error}"
+        return result
+
+    if not tags:
+        result["latest_tag"] = UNAVAILABLE
+        result["latest_version"] = UNAVAILABLE
+        result["update_available"] = UNAVAILABLE
+        result["reason"] = "the remote has no tags yet, so there is no version to compare against"
+        result["remote_tag_count"] = 0
+        return result
+
+    def sort_key(name: str) -> tuple[int, ...]:
+        return _parse_version(name)
+
+    ordered = sorted(tags, key=sort_key)
+    latest = ordered[-1]
+    result["latest_tag"] = latest
+    result["latest_version"] = sort_key(latest)
+    result["remote_tag_count"] = len(ordered)
+    result["available_tags"] = ordered[-6:]
+
+    local_v = _parse_version(result.get("local_tag") or "") or _parse_version(VERSION)
+    latest_v = result["latest_version"]
+    result["update_available"] = bool(latest_v > local_v)
+
+    if result["update_available"]:
+        code, log = _git(root, "log", "--oneline", f"HEAD..{tags[latest]}", timeout=8)
+        result["commits_behind"] = len([l for l in log.splitlines() if l.strip()]) if code == 0 else UNAVAILABLE
+        result["commits_preview"] = [l for l in log.splitlines() if l.strip()][:10] or UNAVAILABLE
+    else:
+        result["commits_behind"] = 0
+        result["commits_preview"] = []
+
+    result["how_to_update"] = [
+        f"cd {root}",
+        "git fetch origin",
+        f"git log HEAD..origin/{result.get('branch', 'main')} --oneline   # read what changed",
+        "git pull --ff-only origin " + str(result.get("branch") or "main"),
+        "python -m unittest discover -s tests    # verify before trusting it",
+    ]
+    result["safety"] = (
+        "Aletheia never runs this for you. A skill file being read by another agent "
+        "while it is rewritten is a bad trade, so updating stays your decision."
+    )
+    return result
+
+
+# --- Where is this skill installed? -------------------------------------------
+
+def find_installations(name: str = "aletheia") -> dict[str, list[str]]:
+    """Every host directory this skill is installed into.
+
+    A skill can live in several places at once — that is normal, not a problem.
+    Knowing where is what makes an update actionable instead of vague.
+    """
+    found: dict[str, list[str]] = {}
+    for host, spec in TELEMETRY_HOSTS.items():
+        for raw in spec.get("skills", ()):
+            root = Path(raw).expanduser()
+            if not root.is_dir():
+                continue
+            candidate = root / name
+            if (candidate / "SKILL.md").is_file():
+                found.setdefault(spec["label"], []).append(str(candidate))
+    # The repository working copy counts too: it is the source, not an install.
+    repo = _repo_root()
+    if repo and (repo / "skills" / name / "SKILL.md").is_file():
+        found.setdefault("(this repository)", []).append(str(repo / "skills" / name))
+    return found
+
+
+def scan_upstreams(
+    roots: list[Path] | None = None, since_days: float = 365.0
+) -> dict[str, Any]:
+    """Find every installed skill and what can be known about its origin.
+
+    Most third-party skills carry no upstream URL, and inventing one would be
+    worse than reporting nothing. Where the evidence is absent, this says so.
+    """
+    skill_roots = roots or default_roots(Path.cwd())
+    skills, issues = discover(skill_roots)
+    inventory = build_inventory(skills, issues, skill_roots, limit=0)
+    by_path = {s.path: s for s in skills}
+    unique = [by_path[e["path"]] for e in inventory["entries"] if e["path"] in by_path]
+
+    cutoff = time.time() - since_days * 86400
+    rows: list[dict[str, Any]] = []
+    untracked = 0
+    for skill in unique:
+        path = Path(skill.path)
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        # A skill inside some other git repository has a reachable upstream.
+        repo = _repo_root(path.parent)
+        rows.append({
+            "name": skill.name,
+            "path": skill.path,
+            "in_git_repo": repo is not None,
+            "upstream": str(repo) if repo else UNAVAILABLE,
+            "upstream_reason": "" if repo else "not inside a git repository; no upstream recorded",
+            "days_since_modified": round((time.time() - mtime) / 86400, 1) if mtime else UNAVAILABLE,
+            "stale_over_days": round((time.time() - mtime) / 86400, 1) > since_days if mtime else UNAVAILABLE,
+        })
+        if repo is None:
+            untracked += 1
+
+    self_check = check_update()
+    return {
+        "total_unique_skills": len(unique),
+        "install_locations": len(skills),
+        "tracked_by_git": len(unique) - untracked,
+        "no_upstream_recorded": untracked,
+        "note": (
+            "A skill is only refreshable if something records where it came from. "
+            "Those that are not inside a repository have no upstream this tool can "
+            "name — inventing one would be worse than reporting the gap."
+        ),
+        "self": self_check,
+        "installations": find_installations(),
+        "skills": rows,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read-only, local Agent Skills discovery & routing hints")
     parser.add_argument("--version", action="version", version=VERSION)
@@ -2704,6 +2941,17 @@ def main(argv: list[str] | None = None) -> int:
     est_cmd.add_argument("--record", type=Path, default=None, help="append this measurement to the ledger")
     est_cmd.add_argument("--ledger", type=Path, default=None, help="override ledger location")
 
+    upd = sub.add_parser(
+        "update",
+        help="check whether this skill or any installed skill has a newer version (detection only)",
+    )
+    upd.add_argument("--no-fetch", action="store_true",
+                     help="report local state without contacting the remote")
+    upd.add_argument("--repo", type=Path, default=None, help="repository to check (default: this skill's repo)")
+    upd.add_argument("--scan", action="store_true",
+                     help="also report every installed skill and whether an upstream is known")
+    upd.add_argument("--unused-days", type=float, default=365.0, help="staleness threshold for --scan")
+
     aud = sub.add_parser("audit", help="inspect the whole library for breakage, staleness and redundancy")
     aud.add_argument("--root", action="append", default=[])
     aud.add_argument("--unused-days", type=float, default=90.0, help="a skill unseen for this long is flagged stale")
@@ -2766,6 +3014,14 @@ def main(argv: list[str] | None = None) -> int:
                 "actual_tokens_source": "active walk of local files; no host asked",
                 "router_version": VERSION,
             }, base=(args.ledger.parent if args.ledger else None)))
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "update":
+        if args.scan:
+            payload = scan_upstreams(since_days=args.unused_days)
+        else:
+            payload = check_update(repo=args.repo, fetch=not args.no_fetch)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
