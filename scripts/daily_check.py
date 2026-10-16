@@ -72,7 +72,7 @@ def append_log(lines: list[str]) -> None:
     LOG_FILE.write_text("\n".join(kept) + "\n", encoding="utf-8")
 
 
-def build_summary(audit: dict, telemetry: dict) -> str:
+def build_summary(audit: dict, telemetry: dict, active: dict | None = None) -> str:
     counts = audit["counts"]
     hosts = telemetry.get("hosts", {})
     readable = [h for h, v in hosts.items() if v.get("available")]
@@ -102,6 +102,30 @@ def build_summary(audit: dict, telemetry: dict) -> str:
     if missing:
         lines.append(f"No token telemetry: {', '.join(missing)} — read from that host's own UI.")
     lines.append("These totals cover the scanned session files only, not all historical usage.")
+
+    if active:
+        totals = active["token_totals"]
+        context = active["context_load"]
+        inv = active["inventory"]
+        lines.append("")
+        lines.append("Active measurement (read from disk, no host asked):")
+        lines.append(
+            f"  tokens: {totals['input']:,} in · {totals['output']:,} out ·"
+            f" {totals['cache_read']:,} cache read"
+        )
+        lines.append(f"  completeness: {totals['completeness']}")
+        lines.append(
+            f"  library: {inv['unique_skills']} unique skills"
+            f" ({inv['duplicate_installs']} duplicate installs)"
+        )
+        lines.append(
+            f"  context cost: {context['metadata_tokens_est']:,} est. tokens of metadata"
+            f" for {context['visible_skills']} visible skill(s)"
+        )
+        blocked = active.get("unmeasurable_here", {})
+        unavailable = [k for k, v in blocked.items() if v == "unavailable"]
+        if unavailable:
+            lines.append(f"  not measurable here: {', '.join(unavailable)}")
 
     if audit["fix_applied"]:
         fixed = [b for b in audit["broken"] if b.get("repaired")]
@@ -143,18 +167,29 @@ def main() -> int:
         print(f"Audit produced unparseable output:\n{out[:500]}", file=sys.stderr)
         return 2
 
+    # `estimate` is the active walk: it measures what it can from local files
+    # without depending on any host volunteering its numbers.
+    _, act_out = run_router("estimate", "--since-days", "30")
+    try:
+        active = json.loads(act_out)
+    except ValueError:
+        active = None
+
     _, tel_out = run_router("telemetry", "--since-days", "30")
     try:
         telemetry = json.loads(tel_out)
     except ValueError:
         telemetry = {"hosts": {}}
 
-    summary = build_summary(audit, telemetry)
+    summary = build_summary(audit, telemetry, active)
     append_log([summary, "", f"audit exit code: {code}"])
 
     needs_attention = bool(audit["recommendations"])
     if args.json:
-        print(json.dumps({"audit": audit, "telemetry": telemetry}, ensure_ascii=False, indent=2))
+        print(json.dumps(
+            {"audit": audit, "telemetry": telemetry, "active_measurement": active},
+            ensure_ascii=False, indent=2,
+        ))
     elif args.quiet and not needs_attention:
         pass
     elif args.notify or args.quiet or not needs_attention:

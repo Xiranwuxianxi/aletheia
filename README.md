@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
-[![Version](https://img.shields.io/badge/version-1.8.2-888780?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.9.0-888780?style=flat-square)](CHANGELOG.md)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -387,6 +387,38 @@ The format follows `--format`, then the output extension, then HTML. With no
 The text tier is a **formatted document, not a dump**: heading rules, aligned
 columns, a provenance legend, and every figure labelled. Bare numbers in a chat
 bubble are not offered as a mode.
+
+## Measuring without asking the host
+
+Reading what a host chooses to export is reactive. `estimate` inverts it — walk
+the machine, measure what is measurable, never ask anyone:
+
+```bash
+python skills/aletheia/scripts/router.py estimate --task "quarterly deck"
+python skills/aletheia/scripts/router.py estimate --only excel-xlsx,guizang-ppt-skill
+```
+
+```text
+input 11,365,980 · output 1,978,510 · cache_read 364,126,214 · cache_write 483,380
+completeness: partial — 10 host(s) persist no token counter
+library: 252 unique skills (708 duplicate installs)
+context cost: 44,322 est. tokens of metadata
+```
+
+Two figures are named `unavailable` rather than estimated: **host-internal
+reasoning tokens** (never written to disk) and **billed cost** (needs a model id
+and a price table). No price table is bundled — a stale one silently becomes a
+confidently wrong money figure.
+
+Host log growth is reported as **bytes, explicitly not tokens**, and never summed
+into a token total.
+
+The scoping saving, measured from the files rather than modelled:
+
+```text
+whole library: 44,322 est. tokens of metadata
+scoped to 2:       347 est. tokens        — a 99.2% reduction
+```
 
 ## Keeping the library healthy
 

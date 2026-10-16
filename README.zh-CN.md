@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
-[![Version](https://img.shields.io/badge/version-1.8.2-888780?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.9.0-888780?style=flat-square)](CHANGELOG.md)
 
 [English](README.md) · **简体中文**
 
@@ -347,6 +347,36 @@ stdout，可以直接粘贴。
 
 **文本形态是排好版的文档，不是数据倾倒**：标题分隔线、列对齐、出处图例、
 每个数字标注 measured / estimated / unavailable。聊天框里甩一堆裸数字**不在可选范围内**。
+
+## 不依赖宿主的自主计量
+
+读宿主「愿意导出的数据」是被动的。`estimate` 反过来——**自己扫本机，能测多少测多少，
+不向任何人索要**：
+
+```bash
+python skills/aletheia/scripts/router.py estimate --task "季度 PPT"
+python skills/aletheia/scripts/router.py estimate --only excel-xlsx,guizang-ppt-skill
+```
+
+```text
+input 11,365,980 · output 1,978,510 · cache_read 364,126,214 · cache_write 483,380
+completeness: partial — 10 个宿主未持久化 token 计数
+library: 252 个唯一 skill（708 处重复安装）
+context cost: 44,322 est. tokens 元数据
+```
+
+有两项**明确标 `unavailable` 而非估算**：**宿主内部推理 token**（根本没落盘）、
+**计费金额**（需要模型 id + 价格表）。**不内置价格表**——过期价格表会悄悄变成一个
+自信的、错误的金额。
+
+宿主日志增长按**字节**报告，**明确标注不是 token**，也**绝不并入 token 总计**。
+
+作用域省多少，是**从文件实测**而非建模估算：
+
+```text
+全库:  44,322 est. tokens 元数据
+限 2 个:   347 est. tokens        —— 省 99.2%
+```
 
 ## 技能库健康维护
 

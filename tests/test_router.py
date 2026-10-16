@@ -702,6 +702,102 @@ class RouterTests(unittest.TestCase):
             "the separator test should exist and be discoverable by this guard",
         )
 
+    def test_active_measurement_needs_no_host(self):
+        """The point of `estimate`: measurement must not wait for a host.
+
+        If this ever starts requiring anything from the host, the tool has gone
+        back to being reactive — which is the problem it was built to solve.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            sessions = base / ".claude" / "projects" / "p"
+            sessions.mkdir(parents=True)
+            (sessions / "s.jsonl").write_text(
+                json.dumps({"message": {"usage": {
+                    "input_tokens": 111, "output_tokens": 22,
+                    "cache_read_input_tokens": 333}}}) + "\n",
+                encoding="utf-8",
+            )
+            result = router.active_measurement(
+                roots=[base], since_days=None, task="hello", hosts=("claude",),
+                home=base,
+            )
+            totals = result["token_totals"]
+            # The bug this guards: canonical buckets are `cache_read`, the host
+            # reports `cache_read_tokens`. Reading the wrong key yields a
+            # confident zero.
+            self.assertEqual(111, totals["input"])
+            self.assertEqual(22, totals["output"])
+            self.assertEqual(333, totals["cache_read"], "cache_read must map from cache_read_tokens")
+            self.assertIn("claude", totals["hosts_included"])
+            self.assertTrue(result["measured_without_asking_any_host"])
+
+    def test_active_measurement_refuses_what_it_cannot_measure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = router.active_measurement(roots=[Path(tmp)], hosts=(), home=Path(tmp))
+            blockers = result["unmeasurable_here"]
+            self.assertEqual(router.UNAVAILABLE, blockers["host_internal_reasoning_tokens"])
+            self.assertEqual(router.UNAVAILABLE, blockers["billed_cost"])
+            # Completeness must be stated, never implied by a bare zero.
+            self.assertIn("hosts_excluded_no_telemetry", result["token_totals"])
+
+    def test_active_measurement_counts_unique_skills_not_installs(self):
+        """A skill mirrored across four agents is loaded once, not four times."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            for root_name in ("a", "b", "c"):
+                d = base / root_name / "dupe"
+                d.mkdir(parents=True)
+                (d / "SKILL.md").write_text(
+                    "---\nname: dupe\ndescription: Installed in three places.\n---\n# body\n",
+                    encoding="utf-8",
+                )
+            result = router.active_measurement(roots=[base], hosts=(), home=base)
+            inv = result["inventory"]
+            self.assertEqual(3, inv["install_locations"])
+            self.assertEqual(1, inv["unique_skills"])
+            self.assertEqual(2, inv["duplicate_installs"])
+            self.assertEqual(1, result["context_load"]["visible_skills"])
+
+    def test_scoped_measurement_shows_the_saving(self):
+        """The number a butler most needs: what scoping actually saves."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            for i in range(8):
+                d = base / f"skill-{i}"
+                d.mkdir()
+                (d / "SKILL.md").write_text(
+                    f"---\nname: skill-{i}\ndescription: A skill with a reasonably long description number {i}.\n---\n# body\n",
+                    encoding="utf-8",
+                )
+            unscoped = router.measure_local_context_load(router.discover([base])[0], "task")
+            scoped = router.measure_local_context_load(
+                router.discover([base])[0], "task", {"skill-0", "skill-1"}
+            )
+            self.assertGreater(unscoped["metadata_tokens_est"], scoped["metadata_tokens_est"])
+            self.assertEqual(8, unscoped["visible_skills"])
+            self.assertEqual(2, scoped["visible_skills"])
+            # Bodies are only read for what is visible.
+            self.assertGreater(unscoped["skill_body_pool_chars"], scoped["skill_body_pool_chars"])
+
+    def test_log_growth_is_never_summed_into_tokens(self):
+        """Bytes are not tokens. The report must not pretend otherwise."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            logs = base / "logs"
+            logs.mkdir()
+            for i in range(3):
+                (logs / f"f{i}.log").write_text("x" * 500, encoding="utf-8")
+            result = router.measure_host_growth({"testhost": logs}, since_hours=24)
+            self.assertEqual(1, len(result))
+            entry = result[0]
+            self.assertEqual(1500, entry["bytes_written"])
+            self.assertIn("NOT tokens", entry["unit"])
+            # No numeric token field may exist on a byte-level record.
+            numeric_keys = {k for k, v in entry.items() if isinstance(v, int)}
+            self.assertEqual({"files_changed", "bytes_written", "since_hours"}, numeric_keys)
+            self.assertIn("cannot be converted", entry["interpretation"])
+
     def test_bilingual_readmes_stay_in_step(self):
         """The two READMEs must not drift apart silently.
 

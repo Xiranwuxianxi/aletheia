@@ -293,6 +293,72 @@ line prefilter (or its data would be dropped before parsing), and every host mus
 return the identical key set. Run `python -m unittest discover -s tests` after
 adding one.
 
+## Active measurement: not waiting for the host
+
+Everything above reads what a host chose to persist. That is reactive, and it
+leaves the measurement at the mercy of whoever felt like exporting their numbers.
+`estimate` inverts it: walk the machine, measure what is measurable, and never
+ask a host for anything.
+
+```bash
+python scripts/router.py estimate --task "quarterly deck" --since-days 30
+python scripts/router.py estimate --only excel-xlsx,guizang-ppt-skill   # scoped
+```
+
+### What it measures without asking
+
+| Figure | How it is obtained |
+| --- | --- |
+| Token usage | Read from every host's session files on disk |
+| Metadata loaded into context | Characters counted from the visible skills right now |
+| Skill-body pool | Every `SKILL.md` read and measured |
+| Duplicate installs | Install paths compared by declared name |
+| Host activity | Bytes written to host log directories in a window |
+
+Measured on this machine:
+
+```text
+input 11,365,980 · output 1,978,510 · cache_read 364,126,214 · cache_write 483,380
+completeness: partial — 10 host(s) persist no token counter
+library: 252 unique skills (708 duplicate installs)
+context cost: 44,322 est. tokens of metadata for 252 visible skills
+```
+
+### What it refuses to measure
+
+Two things are named `unavailable` rather than estimated:
+
+| Figure | Why |
+| --- | --- |
+| Host-internal reasoning tokens | Never written to disk. No amount of local inspection recovers a number that was not recorded. |
+| Billed cost | Needs a model id and a price table. `ALETHEIA_PRICES` can supply prices, but the model id must come from the host. |
+
+No price table is bundled, deliberately. A stale table silently becomes a
+confidently wrong money figure — the exact failure this project exists to
+prevent.
+
+### Bytes are not tokens
+
+Host log growth is reported, but labelled `unit: bytes of log output — NOT
+tokens` and never summed into a token total. It says how much a host *did*, not
+how many tokens it spent, and a test asserts no numeric token field can appear on
+a byte-level record.
+
+### The scoping number a butler actually needs
+
+```text
+whole library: 44,322 est. tokens of metadata
+scoped to 2:       347 est. tokens          — a 99.2% reduction
+```
+
+Measured from the files, not estimated from a model of the files.
+
+### De-duplicated before counting
+
+A skill installed in four agent directories is **one** cost, not four. The active
+measurement runs the same de-duplication as the inventory, so context cost tracks
+what would actually be loaded.
+
 ## The honesty rules, collected
 
 1. No number without a named provenance.

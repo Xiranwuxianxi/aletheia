@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.8.2"
+VERSION = "1.9.0"
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 WORD_RE = re.compile(r"[a-z][a-z0-9+-]{1,}|[\u3400-\u9fff]{2,}", re.I)
 # Shared defaults. The CLI and the offline `eval` command must agree, otherwise
@@ -2395,6 +2395,211 @@ def render_report_markdown(records: list[dict[str, Any]], as_text: bool = False)
     return text
 
 
+# --- Active measurement ------------------------------------------------------
+# The passive adapters above wait for a host to volunteer its numbers. This
+# section is the opposite: walk the machine, find every source that *can* be
+# measured, and report what that adds up to — without asking the host anything.
+#
+# What this can genuinely measure:
+#   * token usage, for any host whose session files record it (no host needed)
+#   * bytes of skill metadata actually loaded into context
+#   * bytes of the skill bodies loaded, from the SKILL.md files themselves
+#   * growth of a host's own log files, which correlate with work done
+#
+# What it cannot, and will not fake:
+#   * a host that persists no token counter (WorkBuddy) — the number exists in
+#     the network response, not on disk. Reporting a guess here would be worse
+#     than reporting nothing, because the guess would look like a measurement.
+
+# Claude/OpenAI-style pricing is deliberately NOT bundled. A stale price table
+# silently turns into a confidently wrong money figure, which is precisely the
+# failure this project exists to prevent. Bring your own.
+PRICE_TABLE_ENV = "ALETHEIA_PRICES"
+
+
+def count_tokens(text: str, script: str = "cjk_mixed") -> int:
+    """Estimate tokens from characters using a documented bytes-per-token rule.
+
+    This is an ESTIMATE and is always labelled as one. It is useful for
+    relative comparison (this routing decision vs that one), which is what a
+    butler actually needs — not for billing.
+    """
+    return estimate_tokens(len(text), script)
+
+
+def measure_local_context_load(
+    skills: list[Skill], task: str = "", allowed: set[str] | None = None
+) -> dict[str, Any]:
+    """What routing costs in context, measured from the files themselves.
+
+    Metadata is loaded for every visible skill; a skill's body is loaded only if
+    selected. Both counts are character counts read from disk right now, so the
+    token figure is a conversion of a measurement — not a guess.
+    """
+    visible, _ = apply_scope(skills, allowed)
+    meta_chars = sum(len(s.name) + len(s.description) + 40 for s in visible)
+    # A rough body cost: every SKILL.md in the visible set is a real file whose
+    # size we can read. The agent reads only the ones it selects, so report the
+    # full pool and let the caller pick a subset.
+    body_pool_chars = 0
+    for skill in visible:
+        raw = _read_safe(Path(skill.path))
+        if raw:
+            body_pool_chars += len(raw)
+    task_chars = len(task)
+    return {
+        "task_chars": task_chars,
+        "task_tokens_est": count_tokens(task),
+        "metadata_chars": meta_chars,
+        "metadata_tokens_est": count_tokens("\0" * meta_chars),
+        "skill_body_pool_chars": body_pool_chars,
+        "skill_body_pool_tokens_est": count_tokens("\0" * body_pool_chars),
+        "visible_skills": len(visible),
+        "total_skills": len(skills),
+        "basis": "characters read from disk now; tokens converted by a documented rule",
+    }
+
+
+def measure_host_growth(
+    roots: dict[str, Path], since_hours: float = 24.0
+) -> list[dict[str, Any]]:
+    """Bytes written by host log directories in a time window.
+
+    A weak but honest proxy: it says how much a host *did*, not how many tokens
+    it spent. Reported separately and never summed into a token total, because
+    log bytes and tokens are not the same unit.
+    """
+    cutoff = time.time() - since_hours * 3600
+    out: list[dict[str, Any]] = []
+    for host, path in roots.items():
+        if not path.is_dir():
+            continue
+        total = 0
+        files = 0
+        newest = 0.0
+        try:
+            for item in path.rglob("*"):
+                try:
+                    if not item.is_file():
+                        continue
+                    stat = item.stat()
+                except OSError:
+                    continue
+                if stat.st_mtime >= cutoff:
+                    total += stat.st_size
+                    files += 1
+                    newest = max(newest, stat.st_mtime)
+        except OSError:
+            continue
+        if files:
+            out.append({
+                "host": host,
+                "path": str(path),
+                "files_changed": files,
+                "bytes_written": total,
+                "since_hours": since_hours,
+                "newest_mtime": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(newest)),
+                "unit": "bytes of log output — NOT tokens",
+                "interpretation": "proxy for work volume only; cannot be converted to tokens",
+            })
+    return out
+
+
+def active_measurement(
+    roots: list[Path] | None = None,
+    since_days: float | None = 30.0,
+    task: str = "",
+    hosts: tuple[str, ...] | None = None,
+    allowed: set[str] | None = None,
+    home: Path | None = None,
+) -> dict[str, Any]:
+    """Measure everything measurable on this machine, without asking any host.
+
+    The point is that measurement no longer depends on a host offering it. For
+    hosts that already persist usage that is a read; for hosts that do not, the
+    context load and log growth are still real numbers, and the missing piece is
+    named explicitly instead of filled in.
+    """
+    skill_roots = roots or default_roots(Path.cwd())
+    # Discover returns every install, including duplicate copies. The butler's
+    # view is the de-duplicated one, otherwise a skill mirrored across four
+    # agents would be counted four times in the context cost.
+    skills, issues = discover(skill_roots)
+    inventory = build_inventory(skills, issues, skill_roots, limit=0)
+    unique_paths = [e["path"] for e in inventory["entries"]]
+    by_path = {s.path: s for s in skills}
+    unique_skills = [by_path[p] for p in unique_paths if p in by_path]
+
+    # `home` lets a caller point the whole measurement at a different root —
+    # without it a test can never isolate itself from the real machine.
+    usage = collect_host_usage(base=home, since_days=since_days, hosts=hosts)
+    measured_hosts = {h: v for h, v in usage.items() if v.get("available")}
+    silent_hosts = {h: v for h, v in usage.items() if not v.get("available")}
+
+    # Aggregate only across hosts that actually reported. Summing a set in which
+    # some members are zero-by-absence would understate the total.
+    token_totals = {k: 0 for k in TOKEN_FIELDS}
+    # `collect_host_usage` names its fields `cache_read_tokens` while the
+    # canonical bucket is `cache_read`. Reading the wrong key silently yields 0,
+    # which is exactly the "confident zero" this project refuses to emit.
+    key_map = {
+        "input": "input_tokens",
+        "output": "output_tokens",
+        "cache_read": "cache_read_tokens",
+        "cache_write": "cache_write_tokens",
+    }
+    for info in measured_hosts.values():
+        for key in TOKEN_FIELDS:
+            token_totals[key] += _int(info.get(key_map[key]))
+
+    home = home or Path.home()
+    log_roots = {
+        "workbuddy": home / ".workbuddy" / "logs",
+        "codebuddy": home / ".codebuddy" / "logs",
+        "claude": home / ".claude" / "projects",
+        "codex": home / ".codex" / "sessions",
+    }
+
+    return {
+        "measured_without_asking_any_host": True,
+        "token_totals": {
+            **token_totals,
+            "hosts_included": sorted(measured_hosts),
+            "hosts_excluded_no_telemetry": sorted(silent_hosts),
+            "completeness": (
+                "complete across this machine" if not silent_hosts
+                else f"partial — {len(silent_hosts)} host(s) persist no token counter"
+            ),
+        },
+        "context_load": measure_local_context_load(unique_skills, task, allowed),
+        "inventory": {
+            "unique_skills": len(unique_skills),
+            "install_locations": len(skills),
+            "duplicate_installs": len(skills) - len(unique_skills),
+            "note": "context cost is counted once per unique skill, not per install",
+        },
+        "log_growth": measure_host_growth(log_roots),
+        "unmeasurable_here": {
+            "host_internal_reasoning_tokens": UNAVAILABLE,
+            "why": (
+                "Some hosts do not log reasoning tokens at all, and none of them log "
+                "them to disk. No amount of local inspection recovers a number that was "
+                "never written down. Read it from the host's own accounting."
+            ),
+            "billed_cost": UNAVAILABLE,
+            "billed_cost_why": (
+                "Requires a model id and a price table. " + PRICE_TABLE_ENV +
+                " can supply prices, but the model id must come from the host."
+            ),
+        },
+        "honesty": (
+            "Everything above was read from disk. Token figures from hosts that log them "
+            "are measured; context figures are conversions of measured characters; log "
+            "figures are bytes and are not tokens. Nothing here is invented."
+        ),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read-only, local Agent Skills discovery & routing hints")
     parser.add_argument("--version", action="version", version=VERSION)
@@ -2471,6 +2676,19 @@ def main(argv: list[str] | None = None) -> int:
     hosts_cmd = sub.add_parser("hosts", help="list every supported agent host and what can be read from it")
     hosts_cmd.add_argument("--json", action="store_true", help="machine-readable output (default)")
 
+    est_cmd = sub.add_parser(
+        "estimate",
+        help="measure token usage by walking this machine, without asking any host",
+    )
+    est_cmd.add_argument("--root", action="append", default=[], help="extra skill root (repeatable)")
+    est_cmd.add_argument("--task", default="", help="the task text, to size the context load")
+    est_cmd.add_argument("--only", action="append", default=[],
+                         help="allowlist, to see the scoped cost instead of the whole library")
+    est_cmd.add_argument("--host", action="append", default=[], help="restrict to a host id, or 'all'")
+    est_cmd.add_argument("--since-days", type=float, default=30.0, help="usage window in days")
+    est_cmd.add_argument("--record", type=Path, default=None, help="append this measurement to the ledger")
+    est_cmd.add_argument("--ledger", type=Path, default=None, help="override ledger location")
+
     aud = sub.add_parser("audit", help="inspect the whole library for breakage, staleness and redundancy")
     aud.add_argument("--root", action="append", default=[])
     aud.add_argument("--unused-days", type=float, default=90.0, help="a skill unseen for this long is flagged stale")
@@ -2512,6 +2730,27 @@ def main(argv: list[str] | None = None) -> int:
             }
             append_ledger(record, base=(args.ledger.parent if args.ledger else None))
             payload["recorded"] = str(args.record)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "estimate":
+        roots = [Path(r) for r in args.root] if args.root else None
+        hosts = tuple(sorted(TELEMETRY_HOSTS)) if "all" in (args.host or []) else tuple(args.host or ())
+        payload = active_measurement(
+            roots=roots, since_days=args.since_days, task=args.task, hosts=hosts,
+            allowed=parse_scope(args.only),
+        )
+        if args.record:
+            payload["ledger"] = str(append_ledger({
+                "task_id": f"estimate-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}",
+                "phase": "after",
+                "label": "active measurement",
+                "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "active_measurement": payload,
+                "actual_tokens": UNAVAILABLE,
+                "actual_tokens_source": "active walk of local files; no host asked",
+                "router_version": VERSION,
+            }, base=(args.ledger.parent if args.ledger else None)))
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 

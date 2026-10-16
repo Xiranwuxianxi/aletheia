@@ -4,6 +4,61 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.9.0 — 2026-10-16
+
+Measurement stops depending on hosts volunteering their numbers.
+
+### Added
+
+- **`estimate` subcommand**: walks this machine and measures everything
+  measurable **without asking any host for anything**.
+  - token usage, read from every host that persists it
+  - metadata actually loaded into context, counted from the visible skills
+  - the skill-body pool, every `SKILL.md` read and measured
+  - duplicate installs, by comparing install paths against declared names
+  - host activity, as bytes written to log directories in a window
+  - `--only` to measure the scoped cost, which is the number a butler needs
+- `daily_check.py` now runs the active walk and reports it, so the daily log
+  carries measurement that does not depend on any host.
+- Both READMEs document it in full.
+- `MEASUREMENT.md` gains an "Active measurement" section.
+
+### Measured on this machine
+
+```text
+input 11,365,980 · output 1,978,510 · cache_read 364,126,214 · cache_write 483,380
+completeness: partial — 10 host(s) persist no token counter
+library: 252 unique skills (708 duplicate installs)
+whole-library metadata: 44,322 est. tokens
+scoped to 2 skills:          347 est. tokens   — a 99.2% reduction
+```
+
+### Honesty constraints
+
+- **Host-internal reasoning tokens are `unavailable`, not estimated.** They are
+  never written to disk, and no amount of local inspection recovers a number that
+  was never recorded.
+- **Billed cost is `unavailable`.** It needs a model id and a price table. No
+  price table is bundled on purpose: a stale table silently becomes a
+  confidently wrong money figure.
+- **Log growth is bytes and is labelled as such**, never summed into a token
+  total. A test asserts no numeric token field can appear on a byte-level record.
+- **De-duplicated before counting.** A skill installed in four agent directories
+  is one cost, not four.
+
+### Fixed
+
+- **The active total silently read zero.** The canonical buckets are
+  `cache_read`/`cache_write` while `collect_host_usage` returns
+  `cache_read_tokens`/`cache_write_tokens`; reading the wrong key produced a
+  confident `0`. Exactly the failure this project exists to prevent, present in
+  the feature meant to prevent it. A test now guards the mapping.
+- **`active_measurement` had no `home` parameter**, so it always read the real
+  `Path.home()` and a test could never isolate itself. Found because a test
+  asserting 111 tokens was getting the machine's real Claude figures.
+
+80 tests pass.
+
 ## 1.8.2 — 2026-10-16
 
 Both READMEs brought up to date with v1.8, plus a guard so they cannot drift
