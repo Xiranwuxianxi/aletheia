@@ -964,12 +964,13 @@ class RouterTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = router.scan_upstreams(roots=[root])
+            summary = result["version_summary"]
             self.assertEqual(1, result["total_unique_skills"])
-            self.assertEqual(1, result["no_upstream_recorded"])
+            self.assertEqual(1, summary["no_version_signal"])
+            self.assertEqual(0, summary["checkable_against_upstream"])
             row = result["skills"][0]
-            self.assertFalse(row["in_git_repo"])
-            self.assertEqual(router.UNAVAILABLE, row["upstream"])
-            self.assertTrue(row["upstream_reason"])
+            self.assertEqual("none", row["source_kind"])
+            self.assertEqual(router.UNAVAILABLE, row["update_available"])
 
     def test_installations_lists_where_the_skill_lives(self):
         """A skill in several host directories is normal, not a problem."""
@@ -980,6 +981,118 @@ class RouterTests(unittest.TestCase):
             any("(this repository)" in host for host in found),
             f"the working copy should be reported separately from installs: {list(found)}",
         )
+
+    def _write_skill(self, root: Path, name: str, extra_front: str = "", body: str = "# body\n"):
+        d = root / name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Skill {name} used for version tests.\n{extra_front}---\n{body}",
+            encoding="utf-8",
+        )
+        return d
+
+    def test_marketplace_install_detects_local_modification(self):
+        """The install record carries a content hash; that detects local edits."""
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            d = self._write_skill(root, "market")
+            skill_md = d / "SKILL.md"
+            digest = "sha256:" + hashlib.sha256(skill_md.read_bytes()).hexdigest()
+            (d / "_skillhub_meta.json").write_text(
+                json.dumps({
+                    "slug": "market", "version": "1.2.3", "source": "marketplace",
+                    "installedAt": 1700000000000, "installedContentHash": digest,
+                }),
+                encoding="utf-8",
+            )
+            skills, _ = router.discover([root])
+            record = router.track_skill_version(skills[0], check_remote=False)
+            self.assertEqual("marketplace", record["source_kind"])
+            self.assertEqual("1.2.3", record["installed_version"])
+            self.assertFalse(record["locally_modified"], "hash matches, so unmodified")
+            # A newer release is NOT observable without the marketplace API.
+            self.assertFalse(record["can_check_for_updates"])
+            self.assertEqual(router.UNAVAILABLE, record["update_available"])
+
+            # Now edit the file and confirm it is detected.
+            skill_md.write_text(
+                skill_md.read_text(encoding="utf-8") + "\nlocal edit\n", encoding="utf-8"
+            )
+            record = router.track_skill_version(skills[0], check_remote=False)
+            self.assertTrue(record["locally_modified"], "content hash must now differ")
+
+    def test_declared_version_alone_cannot_detect_updates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_skill(root, "declared", extra_front="version: 2.0.0\n")
+            skills, _ = router.discover([root])
+            record = router.track_skill_version(skills[0], check_remote=False)
+            self.assertEqual("frontmatter", record["source_kind"])
+            self.assertEqual("2.0.0", record["installed_version"])
+            self.assertFalse(record["can_check_for_updates"])
+            self.assertEqual(router.UNAVAILABLE, record["update_available"])
+            self.assertTrue(record["why_not"])
+
+    def test_skill_with_no_version_signal_says_so(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_skill(root, "orphan")
+            skills, _ = router.discover([root])
+            record = router.track_skill_version(skills[0], check_remote=False)
+            self.assertEqual("none", record["source_kind"])
+            self.assertEqual(router.UNAVAILABLE, record["installed_version"])
+            self.assertFalse(record["can_check_for_updates"])
+
+    def test_git_skill_compares_like_for_like_shas(self):
+        """Regression: a full sha compared against a short one always differs.
+
+        `git rev-parse HEAD` returns 40 characters while `ls-remote` may be
+        truncated, so comparing them directly reported every repo as outdated —
+        including a repository that was demonstrably up to date.
+        """
+        import subprocess
+
+        result = router.check_update(repo=ROOT, fetch=True)
+        if not result.get("checked") or result.get("latest_tag") == router.UNAVAILABLE:
+            self.skipTest("no network or no tags available")
+        # This repository is pushed, so it must not report itself as outdated.
+        self.assertIs(
+            result["update_available"], False,
+            f"a fully pushed repo must read as current: {result}",
+        )
+
+    def test_versions_command_never_mutates_a_skill(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            d = self._write_skill(root, "untouched")
+            before = (d / "SKILL.md").read_bytes()
+            proc = subprocess.run(
+                [sys.executable, "-B", str(ROOT / "skills/aletheia/scripts/router.py"),
+                 "versions", "--root", str(root)],
+                capture_output=True, text=True, cwd=str(ROOT),
+            )
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertEqual(before, (d / "SKILL.md").read_bytes(),
+                             "versions must be read-only")
+
+    def test_upstream_scan_and_versions_agree_on_source_kind(self):
+        """Two commands, one source of truth. They must not disagree."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_skill(root, "plain")
+            self._write_skill(root, "withversion", extra_front="version: 0.1.0\n")
+            survey = router.survey_versions(roots=[root], check_remote=False)
+            scan = router.scan_upstreams(roots=[root])
+            survey_kinds = {r["name"]: r["source_kind"] for r in survey["records"]}
+            for row in scan["skills"]:
+                self.assertEqual(
+                    survey_kinds[row["name"]], row["source_kind"],
+                    f"{row['name']}: scan and versions disagree on the source kind",
+                )
 
     def test_chinese_readme_has_no_untranslated_fragments(self):
         """Catch half-translated prose before a reader does.

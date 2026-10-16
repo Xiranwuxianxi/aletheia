@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.10.0"
+VERSION = "1.11.0"
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 WORD_RE = re.compile(r"[a-z][a-z0-9+-]{1,}|[\u3400-\u9fff]{2,}", re.I)
 # Shared defaults. The CLI and the offline `eval` command must agree, otherwise
@@ -2813,43 +2813,259 @@ def scan_upstreams(
     by_path = {s.path: s for s in skills}
     unique = [by_path[e["path"]] for e in inventory["entries"] if e["path"] in by_path]
 
+    # One implementation of "what can be known about a version", so `update --scan`
+    # and `versions` can never disagree about the same skill.
+    survey = survey_versions(roots=skill_roots, check_remote=True)
+    by_name_path = {(r["name"], r["path"]): r for r in survey["records"]}
+
     cutoff = time.time() - since_days * 86400
     rows: list[dict[str, Any]] = []
-    untracked = 0
     for skill in unique:
         path = Path(skill.path)
         try:
             mtime = path.stat().st_mtime
         except OSError:
             mtime = 0.0
-        # A skill inside some other git repository has a reachable upstream.
-        repo = _repo_root(path.parent)
+        record = by_name_path.get((skill.name, skill.path), {})
         rows.append({
             "name": skill.name,
             "path": skill.path,
-            "in_git_repo": repo is not None,
-            "upstream": str(repo) if repo else UNAVAILABLE,
-            "upstream_reason": "" if repo else "not inside a git repository; no upstream recorded",
+            "source_kind": record.get("source_kind", "none"),
+            "installed_version": record.get("installed_version", UNAVAILABLE),
+            "update_available": record.get("update_available", UNAVAILABLE),
             "days_since_modified": round((time.time() - mtime) / 86400, 1) if mtime else UNAVAILABLE,
             "stale_over_days": round((time.time() - mtime) / 86400, 1) > since_days if mtime else UNAVAILABLE,
         })
-        if repo is None:
-            untracked += 1
 
-    self_check = check_update()
     return {
         "total_unique_skills": len(unique),
         "install_locations": len(skills),
-        "tracked_by_git": len(unique) - untracked,
-        "no_upstream_recorded": untracked,
-        "note": (
-            "A skill is only refreshable if something records where it came from. "
-            "Those that are not inside a repository have no upstream this tool can "
-            "name — inventing one would be worse than reporting the gap."
-        ),
-        "self": self_check,
+        "version_summary": {
+            "checkable_against_upstream": survey["checkable_against_upstream"],
+            "declared_version_only": survey["declared_version_only"],
+            "no_version_signal": survey["no_version_signal"],
+            "source_breakdown": survey["source_breakdown"],
+        },
+        "outdated": survey["outdated"],
+        "self": check_update(),
         "installations": find_installations(),
+        "note": survey["honesty"],
         "skills": rows,
+    }
+
+
+def _read_skillhub_meta(skill_dir: Path) -> dict[str, Any] | None:
+    """Read a marketplace install record, if this skill has one.
+
+    Real installs leave a `_skillhub_meta.json` behind. It carries the version
+    that was installed and, sometimes, a content hash — which is enough to detect
+    that the copy on disk has been edited since, even when no upstream can be
+    reached to ask about a newer release.
+    """
+    meta = skill_dir / "_skillhub_meta.json"
+    text = _read_safe(meta)
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _declared_version(skill: Skill) -> str | None:
+    """A `version:` field in the skill's own frontmatter, if it declares one."""
+    text = _read_safe(Path(skill.path))
+    if not text:
+        return None
+    head = text.split("---", 2)
+    front = head[1] if len(head) > 2 else text[:4000]
+    match = re.search(r"^version:\s*(\S+)", front, re.M)
+    return match.group(1).strip().strip("\"'") if match else None
+
+
+def _local_content_hash(skill_dir: Path) -> str | None:
+    """Hash the SKILL.md the way a marketplace install record does.
+
+    Only meaningful when compared against a recorded `installedContentHash`, and
+    only for detecting local modification — never for claiming a version.
+    """
+    import hashlib
+
+    skill_md = skill_dir / "SKILL.md"
+    try:
+        raw = skill_md.read_bytes()
+    except OSError:
+        return None
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def track_skill_version(
+    skill: Skill, check_remote: bool = True
+) -> dict[str, Any]:
+    """Establish what can be known about one skill's version state.
+
+    Three sources exist in the wild, and they support very different claims:
+
+      git        — a real upstream, so an actual comparison is possible
+      marketplace— an install record with a version and sometimes a content hash,
+                    which detects local edits but cannot detect a newer release
+                    without contacting the marketplace
+      frontmatter— a declared version string and nothing else
+
+    Anything else is reported as unknown. Inventing a repository URL to appear
+    helpful would be worse than admitting the gap.
+    """
+    skill_dir = Path(skill.path).parent
+    record: dict[str, Any] = {
+        "name": skill.name,
+        "path": skill.path,
+        "source_kind": "none",
+        "installed_version": UNAVAILABLE,
+        "latest_version": UNAVAILABLE,
+        "update_available": UNAVAILABLE,
+        "can_check_for_updates": False,
+    }
+
+    repo = _repo_root(skill_dir)
+    meta = _read_skillhub_meta(skill_dir)
+
+    if repo is not None:
+        code, url = _git(repo, "remote", "get-url", "origin")
+        code2, head = _git(repo, "rev-parse", "HEAD")
+        code3, branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+        # Compare on the same width. `rev-parse HEAD` gives a full 40-char sha
+        # while `ls-remote` is truncated below — comparing them directly would
+        # report every repo as outdated.
+        local_sha = head[:12] if code2 == 0 else UNAVAILABLE
+        record.update({
+            "source_kind": "git",
+            "upstream": url if code == 0 else UNAVAILABLE,
+            "local_commit": local_sha,
+            "branch": branch if code3 == 0 else UNAVAILABLE,
+            "can_check_for_updates": True,
+        })
+        if check_remote and code == 0 and code2 == 0:
+            remote_sha, error = _remote_head(repo)
+            if remote_sha:
+                record["remote_commit"] = remote_sha
+                record["update_available"] = bool(remote_sha != local_sha)
+            else:
+                record["update_available"] = UNAVAILABLE
+                record["remote_error"] = error or "remote head not resolvable"
+        return record
+
+    if meta is not None:
+        record.update({
+            "source_kind": "marketplace",
+            "installed_version": meta.get("version") or UNAVAILABLE,
+            "marketplace_source": meta.get("source", UNAVAILABLE),
+            "installed_at": meta.get("installedAt"),
+            "can_check_for_updates": False,
+            "why_not": (
+                "the install record names a version but not a repository, so a newer "
+                "release can only be found by asking the marketplace — this tool "
+                "contacts git remotes, not marketplace APIs"
+            ),
+        })
+        recorded_hash = meta.get("installedContentHash")
+        if recorded_hash:
+            actual = _local_content_hash(skill_dir)
+            record["recorded_hash"] = str(recorded_hash)[:24]
+            record["locally_modified"] = (actual != recorded_hash) if actual else UNAVAILABLE
+            record["can_check_for_updates"] = False
+            record["can_detect_local_edits"] = True
+        declared = _declared_version(skill)
+        if declared:
+            record["frontmatter_version"] = declared
+            if record["installed_version"] != UNAVAILABLE and declared != record["installed_version"]:
+                # The two disagree; say which each came from rather than picking.
+                record["version_mismatch"] = {
+                    "installed_record": record["installed_version"],
+                    "frontmatter": declared,
+                    "note": "the install record and the SKILL.md disagree; one of them was edited",
+                }
+        return record
+
+    declared = _declared_version(skill)
+    if declared:
+        record.update({
+            "source_kind": "frontmatter",
+            "installed_version": declared,
+            "can_check_for_updates": False,
+            "why_not": (
+                "a declared version with no upstream means there is nowhere to check "
+                "against; a newer release is unobservable from here"
+            ),
+        })
+        return record
+
+    record["why_not"] = "no git repository, no install record, no declared version"
+    return record
+
+
+def _remote_head(repo: Path) -> tuple[str, str]:
+    """Resolve the upstream HEAD sha without touching the working tree."""
+    code, out = _git(repo, "ls-remote", "origin", "HEAD")
+    if code != 0:
+        return "", out or f"git ls-remote failed ({code})"
+    for line in out.splitlines():
+        parts = line.split()
+        if parts:
+            return parts[0][:12], ""
+    return "", "remote returned no HEAD"
+
+
+def survey_versions(
+    roots: list[Path] | None = None, check_remote: bool = True
+) -> dict[str, Any]:
+    """Every installed skill, and what can actually be known about its version."""
+    skill_roots = roots or default_roots(Path.cwd())
+    skills, issues = discover(skill_roots)
+    inventory = build_inventory(skills, issues, skill_roots, limit=0)
+    by_path = {s.path: s for s in skills}
+    unique = [by_path[e["path"]] for e in inventory["entries"] if e["path"] in by_path]
+
+    records = [track_skill_version(s, check_remote=check_remote) for s in unique]
+
+    by_kind: dict[str, int] = {}
+    for r in records:
+        by_kind[r["source_kind"]] = by_kind.get(r["source_kind"], 0) + 1
+
+    updateable = [r for r in records if r["can_check_for_updates"]]
+    outdated = [r for r in records if r["update_available"] is True]
+    locally_edited = [r for r in records if r.get("locally_modified") is True]
+
+    return {
+        "total_unique_skills": len(records),
+        "source_breakdown": dict(sorted(by_kind.items(), key=lambda x: -x[1])),
+        "checkable_against_upstream": len(updateable),
+        "declared_version_only": by_kind.get("frontmatter", 0) + by_kind.get("marketplace", 0),
+        "no_version_signal": by_kind.get("none", 0),
+        "outdated": [
+            {
+                "name": r["name"], "path": r["path"],
+                "local": r.get("local_commit"), "remote": r.get("remote_commit"),
+                "upstream": r.get("upstream"),
+            }
+            for r in outdated
+        ],
+        "locally_modified_since_install": [
+            {"name": r["name"], "path": r["path"], "installed_version": r["installed_version"]}
+            for r in locally_edited
+        ],
+        "honesty": (
+            "Only skills that are their own git repository can be compared against an "
+            "upstream without a network API. The rest report the version they carry and "
+            "state why a newer one cannot be observed from here. Nothing is guessed."
+        ),
+        "how_to_check_the_rest": [
+            "Marketplace-installed skills: ask the marketplace for a newer release, then compare",
+            "  the returned version against the installed one reported here.",
+            "Skills with only a declared version: record an upstream URL once and this tool",
+            "  can compare it like any other git-sourced skill.",
+        ],
+        "records": records,
     }
 
 
@@ -2952,6 +3168,16 @@ def main(argv: list[str] | None = None) -> int:
                      help="also report every installed skill and whether an upstream is known")
     upd.add_argument("--unused-days", type=float, default=365.0, help="staleness threshold for --scan")
 
+    ver = sub.add_parser(
+        "versions",
+        help="report the version state of every installed skill and flag outdated ones",
+    )
+    ver.add_argument("--root", action="append", default=[], help="extra skill root (repeatable)")
+    ver.add_argument("--no-remote", action="store_true",
+                     help="do not contact any upstream; report local state only")
+    ver.add_argument("--outdated-only", action="store_true",
+                     help="print only skills that are behind or locally modified")
+
     aud = sub.add_parser("audit", help="inspect the whole library for breakage, staleness and redundancy")
     aud.add_argument("--root", action="append", default=[])
     aud.add_argument("--unused-days", type=float, default=90.0, help="a skill unseen for this long is flagged stale")
@@ -3014,6 +3240,18 @@ def main(argv: list[str] | None = None) -> int:
                 "actual_tokens_source": "active walk of local files; no host asked",
                 "router_version": VERSION,
             }, base=(args.ledger.parent if args.ledger else None)))
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "versions":
+        roots = [Path(r) for r in args.root] if args.root else None
+        payload = survey_versions(roots=roots, check_remote=not args.no_remote)
+        if args.outdated_only:
+            payload["records"] = [
+                r for r in payload["records"]
+                if r["update_available"] is True or r.get("locally_modified") is True
+            ]
+            payload["filtered_to"] = "outdated or locally modified only"
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 

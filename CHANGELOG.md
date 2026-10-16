@@ -4,6 +4,74 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.11.0 — 2026-10-16
+
+Version tracking for the whole library, not just this skill. The previous
+release could compare one repository; this compares every skill that has
+something to compare against, and says plainly why the rest cannot be.
+
+### Added
+
+- **`versions` subcommand**: reports the version state of every installed
+  skill — `--outdated-only` to filter, `--no-remote` for offline use.
+- **Three source kinds, with different powers**, each labelled so a reader
+  knows what a row actually proves:
+  - `git` — the skill is its own repository, so a real upstream comparison is
+    possible
+  - `marketplace` — an install record (`_skillhub_meta.json`) carrying a version
+    and sometimes a content hash
+  - `frontmatter` — a declared `version:` string and nothing else
+- **Local modification detection.** A marketplace record stores
+  `installedContentHash`, so a skill edited after installing is identifiable.
+  **44 of them were found on this machine** — and updating any of those would
+  overwrite the local change, which is exactly the surprise a butler should
+  prevent.
+- **`daily_check.py` gained a version section** and exits non-zero when any
+  skill is behind, so the existing 9:10 scheduler surfaces it with no
+  configuration.
+- `update --scan` now shares one implementation with `versions`, so the two
+  commands cannot disagree about the same skill.
+
+### Measured on this machine
+
+```text
+252 unique skills
+  2   git          — a real upstream, genuinely comparable
+  50  marketplace  — version + content hash
+  42  frontmatter  — a declared version string only
+  158 none         — no version signal at all
+
+outdated:
+  huashu-art-motion  57d67608ab45 -> 2571ee0a9a04
+                     https://github.com/alchaincyf/huashu-art-motion.git
+
+locally edited since install: 44
+```
+
+**Only 2 of 252 skills can be checked against an upstream** without a network
+API. That is the honest state of a real library, and reporting it is more
+useful than a guess.
+
+### Fixed
+
+- **Every git-sourced skill was reported as outdated.** `git rev-parse HEAD`
+  returns a 40-character sha while `ls-remote` is truncated to 12, so comparing
+  them directly always differed — including this repository, which was provably
+  up to date. Both are now truncated to the same width. A regression test
+  asserts a fully pushed repository reads as current.
+
+### Honesty constraints
+
+- A skill with no upstream reports `update_available: "unavailable"` and a
+  stated reason. It never reports `false`, because "no update" and "cannot be
+  checked" are different claims.
+- `versions` is read-only. A test hashes a skill's `SKILL.md` before and after
+  running the command and requires the bytes to be identical.
+- No repository URL is ever inferred. A skill with no recorded origin is
+  reported as having none.
+
+96 tests pass. lint `ok: true`, eval 16/16.
+
 ## 1.10.0 — 2026-10-16
 
 Update detection, and an honest accounting of what cannot be updated at all.

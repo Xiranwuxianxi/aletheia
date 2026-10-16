@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
-[![Version](https://img.shields.io/badge/version-1.10.0-888780?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.11.0-888780?style=flat-square)](CHANGELOG.md)
 
 [English](README.md) · **简体中文**
 
@@ -415,6 +415,51 @@ python -m unittest discover -s tests   # 验证后再信任
 ### 更新检测依赖 tag，所以仓库补齐了 tag
 比版本需要可比对的锚点。`v1.8.0` 到 `v1.9.0` 都已打 tag，
 并且有测试在当前版本未打 tag 时失败——**一个不能自我检测更新的可发布仓库是矛盾的**。
+
+### 不只是自己：检查库里每一个 skill
+
+```bash
+python skills/aletheia/scripts/router.py versions             # 全库
+python skills/aletheia/scripts/router.py versions --outdated-only
+python skills/aletheia/scripts/router.py versions --no-remote  # 离线
+```
+
+真实库上的实测：
+
+```text
+252 个唯一 skill
+  2   git            — 有真实上游，可以真正比对
+  50  marketplace    — 有安装记录和版本号
+  42  frontmatter    — 只有一个声明的版本号
+  158 none           — 完全没有版本信号
+```
+
+**查出一个有更新的 skill 并如实报告：**
+
+```text
+huashu-art-motion: 57d67608ab45 -> 2571ee0a9a04
+  https://github.com/alchaincyf/huashu-art-motion.git
+```
+
+### 三类来源能支持的结论完全不同
+
+| 来源 | 能查出有新版吗 | 能查出本地被改过吗 |
+| --- | --- | --- |
+| 独立 git 仓库 | **能** | 能 |
+| 市场安装记录 | 不能——需要市场 API | **能**（内容哈希） |
+| 仅声明版本号 | 不能——没有可比对的对象 | 不能 |
+
+市场安装记录带 `installedContentHash`，所以**查出 44 个安装后被本地改动的 skill**。
+这件事比看起来更重要：**更新它们会覆盖本地改动**——而这正是管家应该防的那种意外。
+
+### 只提醒，不自动执行
+
+`daily_check.py` 现在包含版本段落，只要有 skill 落后就返回非零退出码，
+所以已存在的每天 9:10 定时任务**零配置**就能收到提醒。日报会写明是哪个 skill、
+两个 commit、上游 URL。
+
+**但它依然不自动更新任何东西。** 改一个别的 agent 正在读的 skill 是笔糟糕的买卖；
+而一个被本地改过的 skill，更新会毁掉那些改动。
 
 ### 大部分 skill 没有上游记录，而它如实这么说
 

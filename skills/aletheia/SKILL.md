@@ -12,7 +12,7 @@ description: >-
 license: MIT
 compatibility: Requires filesystem access for the optional Python 3.10+ discovery helper; skill selection works manually with a host-provided skills list when filesystem or Python is unavailable.
 metadata:
-  version: "1.10.0"
+  version: "1.11.0"
   category: meta-routing
 ---
 

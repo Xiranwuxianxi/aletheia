@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
-[![Version](https://img.shields.io/badge/version-1.10.0-888780?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.11.0-888780?style=flat-square)](CHANGELOG.md)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -459,6 +459,54 @@ python -m unittest discover -s tests   # verify before trusting it
 Comparing versions requires something to compare against. `v1.8.0` through
 `v1.9.0` are tagged, and a test fails if the current version is not — a
 release-capable repository that cannot detect its own updates is a contradiction.
+
+### Checking every other skill, not just this one
+
+```bash
+python skills/aletheia/scripts/router.py versions             # the whole library
+python skills/aletheia/scripts/router.py versions --outdated-only
+python skills/aletheia/scripts/router.py versions --no-remote  # offline
+```
+
+Measured on a real library:
+
+```text
+252 unique skills
+  2   git            — a real upstream, genuinely comparable
+  50  marketplace    — an install record with a version
+  42  frontmatter    — a declared version string and nothing else
+  158 none           — no version signal at all
+```
+
+**One outdated skill was found and is reported:**
+
+```text
+huashu-art-motion: 57d67608ab45 -> 2571ee0a9a04
+  https://github.com/alchaincyf/huashu-art-motion.git
+```
+
+### The three sources support very different claims
+
+| Source | Can detect a newer release? | Can detect local edits? |
+| --- | --- | --- |
+| Own git repository | **yes** | yes |
+| Marketplace record | no — needs the marketplace API | **yes** (content hash) |
+| Declared version | no — nowhere to compare against | no |
+
+A marketplace install record carries an `installedContentHash`, so **44 skills
+locally edited after installing** were identified. That matters more than it
+looks: updating one of those overwrites the local changes, which is exactly the
+kind of surprise a butler should prevent.
+
+### Reminders, not automation
+
+`daily_check.py` includes a version section and exits non-zero when any skill is
+behind, so the existing 9:10 scheduler surfaces it with no configuration. The
+daily report names the skill, the two commits, and the upstream URL.
+
+**It still never updates anything.** Updating a skill that another agent is
+mid-read is a bad trade, and a skill with local edits has work that an update
+would destroy.
 
 ### Most skills have no upstream, and this says so
 

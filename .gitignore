@@ -10,6 +10,7 @@ build/
 .DS_Store
 *.log
 *.backup-*
+fix-prompt-v1.9.0.md
 
 # Local editor / agent tooling state, not part of the distributed project
 .workbuddy/

@@ -73,7 +73,7 @@ def append_log(lines: list[str]) -> None:
 
 
 def build_summary(audit: dict, telemetry: dict, active: dict | None = None,
-                  update: dict | None = None) -> str:
+                  update: dict | None = None, versions: dict | None = None) -> str:
     counts = audit["counts"]
     hosts = telemetry.get("hosts", {})
     readable = [h for h, v in hosts.items() if v.get("available")]
@@ -123,6 +123,37 @@ def build_summary(audit: dict, telemetry: dict, active: dict | None = None,
         else:
             lines.append(f"  unknown: {update.get('reason', 'no reason given')}")
         lines.append("  Aletheia detects updates but never applies them — that stays your call.")
+
+    if versions is not None:
+        summary_block = versions.get("source_breakdown", {})
+        lines.append("")
+        lines.append("Skill versions:")
+        lines.append(
+            f"  {versions.get('total_unique_skills')} skills ·"
+            f" {versions.get('checkable_against_upstream', 0)} comparable to an upstream ·"
+            f" {versions.get('declared_version_only', 0)} version-declared only ·"
+            f" {versions.get('no_version_signal', 0)} with no version signal"
+        )
+        for kind, count in sorted(summary_block.items(), key=lambda x: -x[1]):
+            lines.append(f"    {kind}: {count}")
+        outdated = versions.get("outdated") or []
+        if outdated:
+            lines.append(f"  OUTDATED ({len(outdated)}):")
+            for item in outdated[:10]:
+                lines.append(
+                    f"    {item['name']}: {item.get('local')} -> {item.get('remote')}"
+                )
+                if item.get("upstream"):
+                    lines.append(f"      {item['upstream']}")
+        else:
+            lines.append("  no outdated skills")
+        edited = versions.get("locally_modified_since_install") or []
+        if edited:
+            lines.append(
+                f"  {len(edited)} skill(s) edited since install — an update would overwrite local changes"
+            )
+            for item in edited[:3]:
+                lines.append(f"    {item['name']} (installed {item.get('installed_version')})")
 
     if active:
         totals = active["token_totals"]
@@ -204,20 +235,33 @@ def main() -> int:
     except ValueError:
         update = {"checked": False, "reason": "update check produced no readable output"}
 
+    # Version state across the whole library. Outdated skills make the exit
+    # code non-zero so the scheduler surfaces them.
+    _, ver_out = run_router("versions")
+    try:
+        versions = json.loads(ver_out)
+    except ValueError:
+        versions = None
+
     _, tel_out = run_router("telemetry", "--since-days", "30")
     try:
         telemetry = json.loads(tel_out)
     except ValueError:
         telemetry = {"hosts": {}}
 
-    summary = build_summary(audit, telemetry, active, update)
+    summary = build_summary(audit, telemetry, active, update, versions)
     append_log([summary, "", f"audit exit code: {code}"])
 
-    needs_attention = bool(audit["recommendations"]) or update.get("update_available") is True
+    outdated_count = len((versions or {}).get("outdated") or [])
+    needs_attention = (
+        bool(audit["recommendations"])
+        or update.get("update_available") is True
+        or outdated_count > 0
+    )
     if args.json:
         print(json.dumps(
             {"audit": audit, "telemetry": telemetry, "active_measurement": active,
-             "update": update},
+             "update": update, "versions": versions},
             ensure_ascii=False, indent=2,
         ))
     elif args.quiet and not needs_attention:
