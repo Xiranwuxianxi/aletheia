@@ -4,6 +4,56 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+Fixes from a review of v1.9.0. No version bump: these are corrections to
+existing behaviour and documentation, not a new feature.
+
+### Fixed
+
+- **The Windows symlink test errored instead of skipping.** Creating a symlink on
+  Windows needs Administrator or Developer Mode; without it the test raised
+  `OSError [WinError 1314]`. That is an environment limitation, not a defect, and
+  a permanent unrelated error hides real regressions behind it. The test now
+  probes the capability and calls `skipTest`.
+- **Four documents contradicted the code on scope precedence.** The code has
+  always intersected (`&` for both the manifest and the profile), but the docs
+  said `--only` "overrides" — in the same sentence that also said "intersect".
+  All four now state it unambiguously: multiple scope sources are intersected; a
+  skill is in scope only if every source that named it named it. The fourth
+  location was `references/TRANSPARENCY.md`, which the review list missed.
+- **Two error protocols for one failure class.** `parser.error()` (stderr, exit 2)
+  was mixed with JSON `{"error": ...}` (stdout, exit 2), so a machine caller had
+  to handle both. Business-logic failures now go through one `fail()` helper.
+  Argparse still owns genuine argument-parsing errors, which happen before any
+  command semantics exist.
+- **A dead `--json` flag.** `scan`/`route`/`lint` accepted it and never read it —
+  they always emitted JSON. Removed, matching the actual contract. Both READMEs
+  now state it plainly.
+- **The Chinese README's opening sentence was half-translated** — "解蔽"
+  followed by an untranslated English *principles*. Rewritten.
+- **A duplicated CHANGELOG entry.** The 1.1.0 and 1.0.0 sections carried the same
+  README `\n` fix verbatim. The 1.0.0 record is untouched; the 1.1.0 entry is
+  now written as an explicit regression, because a repeat is a signal the
+  original fix lacked a guard — not a duplicate to dedupe away.
+- Cleared `__pycache__` from `skills/aletheia/scripts/` and `tests/`.
+
+### Changed
+
+- **CI matrix now spans ubuntu-latest, macos-latest and windows-latest**, with
+  `fail-fast: false` so one platform's failure does not hide the others. The
+  line-ending and path-separator bugs this project hit were invisible on Linux,
+  so a Linux-only matrix cannot be trusted to catch them. The newest interpreter
+  runs on every platform; older ones are spot-checked on Linux.
+- `tests/test_router.py` gained three guards: business errors are JSON on stdout
+  with exit 2; `--json` is genuinely rejected; scope sources intersect and no doc
+  still says "overrides".
+- Two documentation guards added: no untranslated English fragments in the
+  Chinese README's opening, and no verbatim duplicate CHANGELOG entries. Both
+  were verified to fail when the defect is reintroduced.
+
+85 tests pass. lint `ok: true`, eval 16/16.
+
 ## 1.9.0 — 2026-10-16
 
 Measurement stops depending on hosts volunteering their numbers.
@@ -511,7 +561,10 @@ further ~4 KB.
 
 ### Fixed
 
-- README FAQ rendered literal `\n` sequences instead of line breaks (1.0.0).
+- **Regression:** the README FAQ rendered literal `\n` sequences instead of line
+  breaks — the bug fixed in 1.0.0 reappeared during the bilingual rewrite and
+  was fixed again. Recorded separately because a repeat is a signal that the
+  original fix lacked a guard, not a duplicate to be deduplicated away.
 
 ### Security
 

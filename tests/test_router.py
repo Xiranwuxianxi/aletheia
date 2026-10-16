@@ -889,6 +889,52 @@ class RouterTests(unittest.TestCase):
                 self.assertNotIn("overrides the others", text, f"{doc} still says override")
                 self.assertNotIn("优先于清单", text, f"{doc} still says override")
 
+    def test_chinese_readme_has_no_untranslated_fragments(self):
+        """Catch half-translated prose before a reader does.
+
+        A stray English word inside a Chinese sentence is easy to write and easy
+        to miss on review — the line still looks like Chinese at a glance. This
+        only guards the opening section, where a broken first paragraph does the
+        most damage, and it allows the English terms that are genuinely used
+        (product names, identifiers).
+        """
+        text = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+        head = text.split("## ", 1)[0]
+        # Words that legitimately appear in the Chinese README.
+        allowed = {
+            "Aletheia", "Skill", "Skills", "Agent", "JSON", "CLI", "README",
+            "WorkBuddy", "Codex", "Claude", "MIT", "Python", "GitHub",
+            "Kimi", "Qwen", "Hermes", "OpenClaw", "Copilot", "Gemini",
+            "CHANGELOG", "LICENSE", "CONTRIBUTING", "SECURITY", "Tkinter",
+        }
+        # A stray English word glued between CJK characters — separated only by
+        # punctuation or Markdown emphasis — is a translation that stopped
+        # mid-sentence. The separator class has to include `**` because that is
+        # exactly where it lands in practice: 「解蔽」** principles.
+        separator = r"[\s」』）】*_·、，。]*"
+        suspicious = re.findall(
+            r"[一-鿿]" + separator + r"[A-Za-z]{3,}[A-Za-z\s]*", head
+        )
+        leftovers = [
+            fragment
+            for fragment in suspicious
+            if not any(
+                word in allowed for word in re.findall(r"[A-Za-z]{3,}", fragment)
+            )
+        ]
+        self.assertEqual([], leftovers, f"untranslated fragments in the Chinese README: {leftovers}")
+
+    def test_changelog_does_not_repeat_a_fix_verbatim(self):
+        """A repeated Fix entry is either a duplicate or an undocumented regression."""
+        text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        entries = re.findall(r"^- (?!\*\*)(?!#)(.+)$", text, re.M)
+        seen: dict[str, int] = {}
+        for entry in entries:
+            key = re.sub(r"\s+", " ", entry.strip().rstrip("."))
+            seen[key] = seen.get(key, 0) + 1
+        duplicates = {k: v for k, v in seen.items() if v > 1}
+        self.assertEqual({}, duplicates, f"verbatim duplicate changelog entries: {list(duplicates)}")
+
     def test_bilingual_readmes_stay_in_step(self):
         """The two READMEs must not drift apart silently.
 
