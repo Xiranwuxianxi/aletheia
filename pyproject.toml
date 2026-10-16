@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aletheia"
-version = "1.8.1"
+version = "1.8.2"
 description = "Portable read-only skill discovery helper and open Agent Skills orchestration instructions"
 readme = "README.md"
 requires-python = ">=3.10"

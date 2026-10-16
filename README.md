@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
-[![Version](https://img.shields.io/badge/version-1.8.1-888780?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.8.2-888780?style=flat-square)](CHANGELOG.md)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -86,12 +86,73 @@ Copy `skills/aletheia/` into wherever your agent looks for skills:
 | --- | --- | --- |
 | Codex | `.agents/skills/aletheia/` | `~/.agents/skills/aletheia/` |
 | Claude Code | `.claude/skills/aletheia/` | `~/.claude/skills/aletheia/` |
+| WorkBuddy | `.workbuddy/skills/aletheia/` | `~/.workbuddy/skills/aletheia/` |
+| Hermes | — | `~/.hermes/skills/aletheia/` |
+| OpenClaw | — | `~/.openclaw/skills/aletheia/` |
+| Kimi Code | — | `~/.kimi/skills/aletheia/` |
+| Qwen Code | — | `~/.qwen/skills/aletheia/` |
+| Gemini CLI | — | `~/.gemini/extensions/aletheia/` |
+| GitHub Copilot CLI | — | `~/.copilot/skills/aletheia/` |
 
 Then add one line to your project instructions:
 
 > Before each substantive task, assess installed skills and use aletheia to select, read and actually apply relevant skills before execution.
 
 </details>
+
+## Works on Windows, macOS and Linux
+
+Standard library only — **nothing to install on any of the three**, `python3`
+included on macOS and Linux. The differences that do exist are handled
+explicitly rather than assumed:
+
+| Concern | Windows | macOS / Linux |
+| --- | --- | --- |
+| Line endings | CRLF preserved on repair | LF preserved on repair |
+| Path separators | both `\` and `/` accepted | `/` native; `\` is a filename character |
+| Home directory | `Path.home()` → `%USERPROFILE%` | `$HOME` |
+| sqlite locking | connections closed before teardown | advisory locks |
+| Terminal glyphs | ASCII bar fallback | box-drawing bar |
+
+Two of these were real bugs, and **CI found both** — they were invisible on the
+developer's machine:
+
+- **CRLF was silently lost on every repair.** Python's text mode translates CRLF
+  to LF when reading, which makes every comparison CRLF-safe but also *erases the
+  evidence* of which convention the file used. Repaired files always came back as
+  LF, showing as a whole-file diff on Windows.
+- **The no-dependency path disagreed with the PyYAML path.** A list-style
+  `allowed-tools` was classified `invalid_yaml` without PyYAML but
+  `allowed_tools_list` with it — so a skill passed locally and failed only on
+  CI. A dedicated job now runs the whole suite with just the standard library,
+  and a structural guard requires any separator test to branch on `os.name`.
+
+The zero-dependency guarantee is load-bearing: it is what lets Aletheia run in a
+fresh CI container, inside another agent's sandbox, or on a host with no package
+manager — which is exactly where a routing tool is most useful.
+
+```bash
+# Prove it: run the same checks with PyYAML blocked
+python tests/zero_dependency_check.py
+```
+
+That script asserts 13 things about the no-PyYAML path, and CI runs it as a
+separate job. It exists because "zero dependencies" is a claim that decays
+silently the first time someone reaches for a convenient import.
+
+## Measured on one machine
+
+| Metric | Count |
+| --- | --- |
+| Unique skills visible | **252** |
+| Install locations scanned | 960 |
+| Agent hosts registered | 14 |
+| Hosts with measured token telemetry | 4 |
+
+Earlier in development the same machine reported 186 unique skills, then 233, then
+252 — each jump traced to a real defect: a one-level walk that missed nested
+plugin caches, then host skill directories that were never scanned at all. The
+numbers are in `CHANGELOG.md` with the cause of each.
 
 ## Transparency in practice
 
@@ -220,23 +281,33 @@ python skills/aletheia/scripts/router.py telemetry    # real totals
 python skills/aletheia/scripts/router.py report --out report.html
 ```
 
-Twelve mainstream hosts are registered. **Every host returns the same keys**, and
-one we cannot read is reported `unavailable` — never `0`.
+Fourteen mainstream hosts are registered. **Every host returns the same keys**,
+and one we cannot read is reported `unavailable` — never `0`.
 
-| Host | Telemetry | Host | Telemetry |
-| --- | --- | --- | --- |
-| Claude Code | measured | OpenCode | partial (JSON store) |
-| Codex | measured | Droid | measured |
-| Kimi Code | measured | Kiro | measured |
-| Qwen Code | measured | Crush | measured |
-| Gemini CLI | measured | Aider | if enabled |
-| Copilot CLI | measured | WorkBuddy | none persisted |
+| Host | Telemetry | Skill dir | Host | Telemetry | Skill dir |
+| --- | --- | --- | --- | --- | --- |
+| Claude Code | measured | `.claude/skills` | **OpenClaw** | SQLite | `.openclaw/skills` |
+| Codex | measured | `.agents/skills` | **Hermes Agent** | SQLite | `.hermes/skills` |
+| Kimi Code | measured | `.kimi/skills` | OpenCode | JSON store | `.opencode/skills` |
+| Qwen Code | measured | `.qwen/skills` | Factory Droid | measured | `.factory/skills` |
+| Gemini CLI | measured | `.gemini/extensions` | Kiro | measured | `.kiro/skills` |
+| GitHub Copilot CLI | measured | `.copilot/skills` | Crush | measured | `.crush/skills` |
+| Aider | if enabled | `.aider/skills` | WorkBuddy | none persisted | `.workbuddy/skills` |
 
 Each host names its fields differently — Claude logs `cache_read_input_tokens`,
 Codex hides `cached_tokens` inside `input_token_details`, Kimi uses
 `input_cache_read` under `message.payload.token_usage`, Qwen and Gemini use
 `promptTokenCount`. Adapters map them onto one shape via an alias table; a layout
 that is not recognised reports `unavailable` rather than a confident zero.
+
+**SQLite-backed hosts** (OpenClaw, Hermes) are read directly — Python's `sqlite3`
+is standard library, so this adds **no dependency**, and databases are opened
+**read-only via URI** because a telemetry reader must never mutate or lock a
+host's store.
+
+Adding a host is a data change, not a code change: append to `TELEMETRY_HOSTS`,
+then run the tests. See
+[`references/MEASUREMENT.md`](skills/aletheia/references/MEASUREMENT.md).
 
 Measured on one machine:
 
@@ -263,8 +334,36 @@ of it; blending them would misstate cost by an order of magnitude.
 `--actual-tokens` is only ever a number **you** read from the host. The tool will
 not derive it.
 
-Adding a host is a data change: append to `TELEMETRY_HOSTS`, run the tests. See
-[`references/MEASUREMENT.md`](skills/aletheia/references/MEASUREMENT.md).
+### One library, several agents
+
+Different agents keep their skills in different directories. Aletheia knows where
+each of the supported hosts puts them, so a skill installed under *any* of them
+stays reachable:
+
+```text
+~/.workbuddy/skills        ~/.hermes/skills        ~/.openclaw/skills
+~/.claude/skills           ~/.agents/skills         ~/.copilot/skills
+~/.kimi/skills             ~/.qwen/skills           ~/.gemini/extensions
+~/.factory/skills          ~/.kiro/skills           ~/.crush/skills
+~/.aider/skills            ~/.config/opencode/skill
+```
+
+This matters more than it sounds. A library mirrored across agents accumulates
+duplicates and drifts, and the audit says so rather than hiding it:
+
+```bash
+python skills/aletheia/scripts/router.py audit \
+  --root ~/.hermes/skills --root ~/.openclaw/skills --unused-days 30
+```
+
+```text
+scanned 213 skill(s)
+healthy 210   broken 3 (blocking 0)   stale 2   duplicated 17
+```
+
+Inventory de-duplicates by name, so a quoted number never points at an ambiguous
+pair — but the *count* of duplicate installs is reported honestly, because that
+is the thing worth acting on.
 
 Records stay local in `~/.aletheia/ledger.jsonl`. `report` exports a
 self-contained HTML file — no CDN, no fonts, no network — where measured values

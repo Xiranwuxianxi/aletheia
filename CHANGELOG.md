@@ -4,6 +4,51 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.8.2 — 2026-10-16
+
+Both READMEs brought up to date with v1.8, plus a guard so they cannot drift
+apart silently again.
+
+### Added
+
+- **Both READMEs document what shipped in v1.8**:
+  - the host table now lists all **fourteen** hosts with each one's skill
+    directory, rather than twelve hosts and no paths
+  - SQLite-backed hosts (OpenClaw, Hermes) explained: read directly, `sqlite3` is
+    standard library so no dependency is added, opened read-only via URI
+  - **"One library, several agents"** — the fourteen skill directories Aletheia
+    scans, and the real finding that mirroring a library across agents produces
+    17 duplicate installs and drift
+  - **"Works on Windows, macOS and Linux"** — the per-platform table, and both
+    portability bugs CI caught, because a reader deciding whether the tool fits
+    their machine needs to know it does
+  - the zero-dependency guarantee, with the command that proves it
+  - measured numbers: 252 unique skills, 960 install locations, 14 hosts, 4 with
+    measured telemetry
+  - nine install locations for the skill itself, up from two
+
+### Fixed
+
+- Host names in the READMEs did not match the registry: `Copilot CLI` vs
+  `GitHub Copilot CLI`, `Droid` vs `Factory Droid`, `Hermes` vs `Hermes Agent`. A
+  reader searching for their tool would not have found it.
+
+### Tests
+
+Two new guards, both of which caught a real problem the moment they were added:
+
+- **`test_bilingual_readmes_stay_in_step`** asserts on *facts* rather than prose,
+  because wording legitimately differs between languages. Every registered host
+  label must appear in the English README; every capability fact (host count,
+  SQLite support, the zero-dependency script, cross-platform handling) must
+  appear in both; and both files must reference the same `references/` set. It
+  immediately flagged the missing zero-dependency mention and three mismatched
+  host names.
+- **`test_readme_links_resolve`** checks every relative link in both files, so a
+  documentation path cannot rot unnoticed.
+
+75 tests pass.
+
 ## 1.8.1 — 2026-10-16
 
 A test bug, caught by CI, that could only ever fail on Linux.

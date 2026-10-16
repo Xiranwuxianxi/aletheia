@@ -691,6 +691,67 @@ class RouterTests(unittest.TestCase):
         separators must branch on `os.name`.
         """
         source = (ROOT / "tests" / "test_router.py").read_text(encoding="utf-8")
+        separator_tests = re.findall(r'def (test_[a-z_]*separator[a-z_]*)\(', source)
+        for name in separator_tests:
+            start = source.index(f"def {name}(")
+            body = source[start : source.find("\n    def ", start + 10)]
+            if "os.name" not in body:
+                self.fail(f"{name} manipulates path separators but never checks os.name")
+        self.assertIn(
+            "test_paths_are_handled_with_both_separators", separator_tests,
+            "the separator test should exist and be discoverable by this guard",
+        )
+
+    def test_bilingual_readmes_stay_in_step(self):
+        """The two READMEs must not drift apart silently.
+
+        This project ships an English default and a Chinese translation. Every
+        capability added in one language has to appear in the other, or half the
+        readers are missing features that exist. Asserted on *facts* (counts,
+        host ids, paths) rather than prose, because wording legitimately differs.
+        """
+        en = (ROOT / "README.md").read_text(encoding="utf-8")
+        zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+
+        facts = {
+            "host count": str(len(router.TELEMETRY_HOSTS)),
+            "sqlite hosts": "SQLite",
+            "multi-agent library": ("openclaw/skills", "hermes/skills"),
+            "cross-platform": ("os.name",),
+            "zero-dependency": ("zero_dependency_check",),
+        }
+        for label, needles in facts.items():
+            for needle in needles:
+                self.assertIn(needle, en, f"README.md missing {label}: {needle!r}")
+                self.assertIn(needle, zh, f"README.zh-CN.md missing {label}: {needle!r}")
+
+        # Every registered host must be discoverable from the docs, or a user
+        # cannot tell that their agent is supported.
+        for host, spec in router.TELEMETRY_HOSTS.items():
+            self.assertIn(spec["label"], en, f"README.md does not mention {spec['label']}")
+
+        # Both files must link the same reference set.
+        for name in re.findall(r"`(references/[A-Z_]+\.md)`", en):
+            self.assertIn(name, zh, f"README.zh-CN.md does not reference {name}")
+
+    def test_readme_links_resolve(self):
+        """Every relative link in the READMEs must point at something real."""
+        import re as _re
+
+        for readme in ("README.md", "README.zh-CN.md"):
+            path = ROOT / readme
+            text = path.read_text(encoding="utf-8")
+            for match in _re.finditer(r"\[[^\]]*\]\(([^)#][^)]*)\)", text):
+                target = match.group(1).strip()
+                if target.startswith(("http", "mailto:")):
+                    continue
+                self.assertTrue(
+                    (path.parent / target).resolve().exists(),
+                    f"{readme} links to a missing path: {target}",
+                )
+
+    def test_skill_md_sections_are_not_nested_by_accident(self):
+        source = (ROOT / "tests" / "test_router.py").read_text(encoding="utf-8")
         # Find assertions that pair a replace() with a separator swap.
         separator_tests = re.findall(
             r'def (test_[a-z_]*separator[a-z_]*)\(', source

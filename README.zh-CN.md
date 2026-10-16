@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
-[![Version](https://img.shields.io/badge/version-1.8.1-888780?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.8.2-888780?style=flat-square)](CHANGELOG.md)
 
 [English](README.md) · **简体中文**
 
@@ -75,6 +75,13 @@ python scripts/install.py --platform both --scope user --bootstrap
 | --- | --- | --- |
 | Codex | `.agents/skills/aletheia/` | `~/.agents/skills/aletheia/` |
 | Claude Code | `.claude/skills/aletheia/` | `~/.claude/skills/aletheia/` |
+| WorkBuddy | `.workbuddy/skills/aletheia/` | `~/.workbuddy/skills/aletheia/` |
+| Hermes | — | `~/.hermes/skills/aletheia/` |
+| OpenClaw | — | `~/.openclaw/skills/aletheia/` |
+| Kimi Code | — | `~/.kimi/skills/aletheia/` |
+| Qwen Code | — | `~/.qwen/skills/aletheia/` |
+| Gemini CLI | — | `~/.gemini/extensions/aletheia/` |
+| GitHub Copilot CLI | — | `~/.copilot/skills/aletheia/` |
 
 然后给项目指令加一句：
 
@@ -113,6 +120,52 @@ python scripts/install.py --platform both --scope user --bootstrap
 
 确认门触发于：破坏性、对外发送、财务、范围有歧义的操作。
 **不**触发于：读文件、搜索、跑测试 —— 什么都问只会训练用户闭眼点同意。
+
+## Windows / macOS / Linux 都能跑
+
+纯标准库，**三个平台都不需要装任何东西**（macOS 和 Linux 自带 `python3`）。
+真正存在的差异是显式处理的，不是靠假设：
+
+| 关注点 | Windows | macOS / Linux |
+| --- | --- | --- |
+| 换行符 | 修复后保留 CRLF | 保留 LF |
+| 路径分隔符 | `\` 和 `/` 都接受 | `/` 是原生；`\` 只是文件名字符 |
+| 家目录 | `Path.home()` → `%USERPROFILE%` | `$HOME` |
+| sqlite 锁 | 拆目录前先关连接 | 咨询锁 |
+| 终端字形 | ASCII 进度条兜底 | 方块字符进度条 |
+
+其中**两个是真 bug，而且是 CI 发现的**——在开发者本机上完全看不出来：
+
+- **修复时 CRLF 被静默丢掉。** Python 文本模式读取时会把 CRLF 转成 LF，这让所有比较都不受
+  CRLF 影响，但也**抹掉了「这个文件用的是什么换行符」的证据**。结果修复后的文件总是变成 LF，
+  在 Windows 上显示为整文件 diff。
+- **零依赖路径与 PyYAML 路径结论不一致。** 列表式 `allowed-tools` 在没有 PyYAML 时被判成
+  `invalid_yaml`，有 PyYAML 时判成 `allowed_tools_list`——于是本机绿、CI 红。现在有独立 job
+  只用标准库跑全套检查，还有一道结构性守卫：任何涉及路径分隔符的测试**必须**分支 `os.name`。
+
+零依赖这个承诺是**有实际价值的**：它让 Aletheia 能跑在全新的 CI 容器里、另一个 agent 的沙箱里、
+或者任何没有包管理器的机器上——而那恰恰是路由工具最该能用的地方。
+
+```bash
+# 自证：屏蔽 PyYAML 后跑同一套检查
+python tests/zero_dependency_check.py
+```
+
+该脚本对无 PyYAML 路径断言 13 项，CI 也把它作为独立 job 运行。
+它存在的理由是：**「零依赖」这个承诺，会在第一次有人顺手 import 一个方便库时无声地失效**。
+
+## 本机实测数据
+
+| 指标 | 数量 |
+| --- | --- |
+| 可见的唯一 skill | **252** |
+| 扫描到的安装位置 | 960 |
+| 已注册 agent 宿主 | 14 |
+| 实测到 token 遥测的宿主 | 4 |
+
+开发过程中同一台机器先后报出 186 → 233 → 252 个唯一 skill，**每一次跳升都对应一个真实缺陷**：
+先是一层扫描漏掉嵌套的插件缓存，再是各宿主的 skill 目录压根没被扫过。每一段的原因都记在
+`CHANGELOG.md` 里。
 
 ## 管家：由谁来选
 
@@ -203,22 +256,29 @@ python skills/aletheia/scripts/router.py telemetry    # 各宿主真实用量
 python skills/aletheia/scripts/router.py report --out report.html
 ```
 
-已注册 **12 个主流宿主**。**每个宿主返回相同的字段结构**，读不到的一律标
+已注册 **14 个主流宿主**。**每个宿主返回相同的字段结构**，读不到的一律标
 `unavailable`，**绝不用 0 冒充**。
 
-| 宿主 | 遥测 | 宿主 | 遥测 |
-| --- | --- | --- | --- |
-| Claude Code | 实测 | OpenCode | 部分（JSON 存储） |
-| Codex | 实测 | Droid（Factory） | 实测 |
-| Kimi Code | 实测 | Kiro | 实测 |
-| Qwen Code | 实测 | Crush | 实测 |
-| Gemini CLI | 实测 | Aider | 需开启 |
-| Copilot CLI | 实测 | WorkBuddy | 未持久化 |
+| 宿主 | 遥测 | Skill 目录 | 宿主 | 遥测 | Skill 目录 |
+| --- | --- | --- | --- | --- | --- |
+| Claude Code | 实测 | `.claude/skills` | **OpenClaw** | SQLite | `.openclaw/skills` |
+| Codex | 实测 | `.agents/skills` | **Hermes Agent** | SQLite | `.hermes/skills` |
+| Kimi Code | 实测 | `.kimi/skills` | OpenCode | JSON 存储 | `.opencode/skills` |
+| Qwen Code | 实测 | `.qwen/skills` | Factory Droid | 实测 | `.factory/skills` |
+| Gemini CLI | 实测 | `.gemini/extensions` | Kiro | 实测 | `.kiro/skills` |
+| GitHub Copilot CLI | 实测 | `.copilot/skills` | Crush | 实测 | `.crush/skills` |
+| Aider | 需开启 | `.aider/skills` | WorkBuddy | 未持久化 | `.workbuddy/skills` |
 
 **每家的字段名都不一样**——Claude 是 `cache_read_input_tokens`，Codex 把
 `cached_tokens` 藏在 `input_token_details`，Kimi 是 `message.payload.token_usage`
 下的 `input_cache_read`，Qwen/Gemini 用 `promptTokenCount`。适配器靠别名表统一
 到一种结构；认不出的格式报 `unavailable`，而不是给一个自信的零。
+
+**SQLite 类宿主**（OpenClaw、Hermes）直接读库——Python 的 `sqlite3` 是标准库，
+**不引入任何依赖**；且以 **URI `mode=ro` 只读打开**，因为遥测读取器绝不能改或锁住宿主的库。
+
+**加宿主是改数据不是改代码**：往 `TELEMETRY_HOSTS` 加一条，然后跑测试。详见
+[`references/MEASUREMENT.md`](skills/aletheia/references/MEASUREMENT.md)。
 
 本机实测：
 
@@ -238,6 +298,35 @@ cache read 单独统计而不并入总计——它便宜得多，混在一起成
 
 **加一个宿主是改数据不是改代码**：往 `TELEMETRY_HOSTS` 里加一条，然后跑测试。
 详见 [`references/MEASUREMENT.md`](skills/aletheia/references/MEASUREMENT.md)。
+
+### 一套库，多个 agent
+
+不同 agent 把 skill 放在不同目录。Aletheia 知道每个受支持宿主的目录在哪，所以
+**装在任何 agent 下的 skill 都仍然可达**：
+
+```text
+~/.workbuddy/skills        ~/.hermes/skills        ~/.openclaw/skills
+~/.claude/skills           ~/.agents/skills         ~/.copilot/skills
+~/.kimi/skills             ~/.qwen/skills           ~/.gemini/extensions
+~/.factory/skills          ~/.kiro/skills           ~/.crush/skills
+~/.aider/skills            ~/.config/opencode/skill
+```
+
+这比听起来更重要。**库在多个 agent 间镜像，必然产生重复和漂移**——而审计会直接告诉你，
+不会藏着：
+
+```bash
+python skills/aletheia/scripts/router.py audit \
+  --root ~/.hermes/skills --root ~/.openclaw/skills --unused-days 30
+```
+
+```text
+scanned 213 skill(s)
+healthy 210   broken 3 (blocking 0)   stale 2   duplicated 17
+```
+
+inventory 按名字去重，所以你回答的序号**永远不会指向一对歧义项**——但**重复安装的数量
+会如实报出来**，因为那才是值得处理的事。
 
 记录只存在本机 `~/.aletheia/ledger.jsonl`。`report` 导出**自包含** HTML —— 无 CDN、无字体、
 无网络，实测值带标记、估算值标 `est`、不可测的格子直接写明原因。见
