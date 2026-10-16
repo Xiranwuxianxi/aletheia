@@ -46,7 +46,14 @@ class RouterTests(unittest.TestCase):
             self.assertEqual(1, len(issues))
             self.assertIn("invalid name", issues[0]["error"])
             (root / "bad/SKILL.md").unlink()
-            (root / "bad/SKILL.md").symlink_to(self.fixtures / "pdf-processing/SKILL.md")
+            # Creating a symlink on Windows needs Administrator or Developer Mode.
+            # Probe it rather than letting the whole test error out in an
+            # environment that simply cannot do this — an error here would hide
+            # real regressions behind a permanent, unrelated failure.
+            try:
+                (root / "bad/SKILL.md").symlink_to(self.fixtures / "pdf-processing/SKILL.md")
+            except (OSError, NotImplementedError) as e:
+                self.skipTest(f"symlinks unavailable on this platform: {e}")
             skills, issues = router.discover([root])
             self.assertFalse(skills)
             self.assertTrue(issues)

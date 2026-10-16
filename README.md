@@ -456,7 +456,9 @@ python skills/aletheia/scripts/router.py route "make a deck" --root skills --onl
 { "only": ["slides-design", "image-creation"] }
 ```
 
-`--only` overrides the manifest; both present means intersect. Withheld skills
+Scope can come from several sources — `--only`, a session manifest, or
+`--profile`. **When more than one is present they are intersected, never
+overridden.** Withheld skills
 are reported as `suppressed_skills` — never silently dropped. Scoping is a
 **routing filter, not a security boundary**.
 

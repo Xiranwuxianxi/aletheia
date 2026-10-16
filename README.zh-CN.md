@@ -412,7 +412,9 @@ python skills/aletheia/scripts/router.py route "做一份 PPT" --root skills --o
 { "only": ["slides-design", "image-creation"] }
 ```
 
-`--only` 优先于清单文件；两者同时存在时取交集。被抑制的技能会在输出里以
+作用域可以来自多个来源——`--only`、会话清单文件、`--profile`。
+**同时存在多个来源时取交集，不是覆盖**：只有每个来源都点名的技能才算在作用域内。
+被抑制的技能会在输出里以
 `suppressed_skills` 明确列出，不会静默丢弃。作用域是**路由过滤器，不是安全边界**。
 
 ## 上下文压力监测

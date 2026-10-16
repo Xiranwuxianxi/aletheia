@@ -6,10 +6,26 @@ permissions:
   contents: read
 jobs:
   verify:
-    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
+        # Windows is in the matrix deliberately. The line-ending and path
+        # separator bugs this project hit were invisible on Linux, so a
+        # Linux-only matrix cannot be trusted to catch them.
+        os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.10", "3.12", "3.13"]
+        exclude:
+          # Keep the matrix to a sane size: full coverage on the newest
+          # interpreter, spot checks on the others.
+          - os: macos-latest
+            python-version: "3.10"
+          - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.10"
+          - os: windows-latest
+            python-version: "3.12"
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -43,6 +59,6 @@ jobs:
       - name: Full test suite without PyYAML
         run: python tests/zero_dependency_check.py
       - name: Discovery works with the standard library alone
-        run: python skills/aletheia/scripts/router.py scan --root tests/fixtures --json
+        run: python skills/aletheia/scripts/router.py scan --root tests/fixtures
       - name: Hosts and skills resolvable without third-party packages
         run: python skills/aletheia/scripts/router.py hosts

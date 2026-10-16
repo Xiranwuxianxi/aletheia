@@ -179,9 +179,12 @@ python scripts/router.py route "make a deck" --profile deck
 { "only": ["slides-design", "image-creation"] }
 ```
 
-`--only` overrides the others; all sources present means intersect. On a
-186-skill inventory, scoping to 3 cuts metadata from 58.6 KB to ~1 KB — check
-`scope.context_estimate` for your own numbers.
+Scope can come from several sources — `--only`, a session manifest, and
+`--profile`. **When more than one is present they are intersected, never
+overridden**: a skill is in scope only if every source that named it named it.
+With one source, that source alone decides. On a 186-skill inventory, scoping to 3
+cuts metadata from 58.6 KB to ~1 KB — check `scope.context_estimate` for your own
+numbers.
 
 **Check `scope.warning` and `scope.unmatched_allowed`.** A typo, or a skill that
 failed metadata lint, otherwise looks exactly like "no relevant skill exists".

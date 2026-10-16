@@ -110,7 +110,9 @@ python skills/aletheia/scripts/router.py route "make a deck" --root skills
 }
 ```
 
-`--only` overrides the manifest, and the two intersect when both are present.
+Scope can come from several sources — `--only`, a session manifest, or
+`--profile`. **When more than one is present they are intersected, never
+overridden**: a skill is in scope only if every source that named it named it.
 Suppressed skills are reported in the output as `suppressed_skills`, never
 silently dropped, so the user can see what was withheld. Scoping is a **routing
 filter, not a security boundary** — it reduces noise and context cost; it does
