@@ -4,6 +4,32 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.11.1 — 2026-10-16
+
+Fixes a failure that only appears in CI, on all three platforms.
+
+### Fixed
+
+- **Five of six jobs failed in "Unit tests"** — ubuntu (3.10/3.12/3.13),
+  macOS and Windows alike, while `no-pyyaml` passed because it does not run the
+  suite.
+- **Cause: the CI clone is shallow.** `actions/checkout` defaults to
+  `fetch-depth: 1`, which fetches no tags, so `git tag -l` is empty and
+  `git describe` fails outright. A test added in 1.10.0 asserts the repository
+  carries a tag — correct in principle, but it made an environment limitation
+  look like a defect, and it passed locally forever because a full clone has
+  tags. Reproduced by cloning with `--depth 1`: zero tags, `describe` fatal.
+- **Two fixes, both needed.** `fetch-depth: 0` so CI has the tags the
+  repository's release contract depends on, and the test now calls `skipTest`
+  when no tag is reachable, because a shallow checkout is a legitimate
+  environment rather than a broken repository. Verified by running the suite in
+  a `--depth 1` clone: 96 tests pass, one skipped.
+
+### Verified
+
+Both environments now pass: full clone (96 pass), shallow clone (96 pass, 1
+skipped).
+
 ## 1.11.0 — 2026-10-16
 
 Version tracking for the whole library, not just this skill. The previous

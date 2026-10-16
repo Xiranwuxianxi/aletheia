@@ -28,6 +28,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The default shallow clone carries no tags, so the update-detection
+          # tests cannot see what they assert about. Tags are part of this
+          # project's release contract, not an optimisation to skip.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
