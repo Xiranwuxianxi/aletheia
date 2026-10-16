@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.7.1"
+VERSION = "1.8.0"
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 WORD_RE = re.compile(r"[a-z][a-z0-9+-]{1,}|[\u3400-\u9fff]{2,}", re.I)
 # Shared defaults. The CLI and the offline `eval` command must agree, otherwise
@@ -85,7 +85,7 @@ def _frontmatter(path: Path) -> dict[str, Any]:
         return parsed
     # Zero-dependency fallback for common scalar frontmatter and folded/literal descriptions.
     # Install PyYAML for general YAML features such as anchors and multiline quoting.
-    result: dict[str, str] = {}
+    result: dict[str, Any] = {}
     i = 0
     lines = raw.splitlines()
     while i < len(lines):
@@ -97,6 +97,20 @@ def _frontmatter(path: Path) -> dict[str, Any]:
             raise SkillError(f"invalid YAML scalar line {i + 1}; install PyYAML for full YAML support")
         key, value = line.split(":", 1)
         key, value = key.strip(), value.strip()
+        # A key with an empty value followed by indented "- " items is a block
+        # sequence. Collect it as a list instead of silently dropping the items,
+        # so callers can see the real shape (e.g. a list-style allowed-tools)
+        # rather than concluding the document is malformed.
+        if value == "":
+            items: list[str] = []
+            j = i + 1
+            while j < len(lines) and lines[j][:1].isspace() and lines[j].strip().startswith("- "):
+                items.append(lines[j].strip()[2:].strip().strip("\"'"))
+                j += 1
+            if items:
+                result[key] = items
+                i = j
+                continue
         if value.startswith((">", "|")):
             folded = value.startswith(">")
             pieces = []
@@ -1319,6 +1333,54 @@ TELEMETRY_HOSTS: dict[str, dict[str, Any]] = {
         "skills": ("~/.kiro/skills", "~/.agents/skills"),
         "native_skill_dir": ".kiro/skills",
     },
+    "openclaw": {
+        "label": "OpenClaw",
+        # Modern installs keep per-agent SQLite stores; the JSONL sessions are
+        # legacy migration input. Both are declared so either is picked up.
+        "sessions": "~/.openclaw",
+        "globs": ("agents/*/sessions/**/*.jsonl", "**/sessions/*.jsonl"),
+        "sqlite": {"path": "~/.openclaw", "glob": "**/*.db",
+                   "table": "sessions",
+                   "columns": {"input": ("input_tokens", "prompt_tokens"),
+                               "output": ("output_tokens", "completion_tokens"),
+                               "cache_read": ("cache_read_tokens", "cached_tokens"),
+                               "cache_write": ("cache_write_tokens",)},
+                   "summed": True},
+        "usage_paths": (("message", "usage"), ("usage",)),
+        "aliases": {
+            "input": ("input", "input_tokens", "prompt_tokens"),
+            "output": ("output", "output_tokens", "completion_tokens"),
+            "cache_read": ("cacheRead", "cache_read_input_tokens", "cached_tokens"),
+            "cache_write": ("cacheWrite", "cache_creation_input_tokens"),
+        },
+        "legacy_homes": ("~/.clawdbot", "~/.moltbot", "~/.moldbot"),
+        "skills": ("~/.openclaw/skills", "~/.agents/skills"),
+        "native_skill_dir": ".openclaw/skills",
+    },
+    "hermes": {
+        "label": "Hermes Agent",
+        "sessions": "~/.hermes",
+        "globs": ("sessions/**/*.jsonl",),  # legacy only; state.db is canonical
+        "sqlite": {"path": "~/.hermes", "glob": "state.db",
+                   "table": "sessions",
+                   "columns": {"input": ("input_tokens", "prompt_tokens"),
+                               "output": ("output_tokens", "completion_tokens"),
+                               "cache_read": ("cache_read_tokens", "cached_tokens"),
+                               "cache_write": ("cache_write_tokens",)},
+                   "summed": True,
+                   # Hermes stores session totals, not per-message counts.
+                   "per_session": True},
+        "usage_paths": (("usage",), ("token_usage",), ("tokens",)),
+        "aliases": {
+            "input": ("input_tokens", "prompt_tokens", "input"),
+            "output": ("output_tokens", "completion_tokens", "output"),
+            "cache_read": ("cache_read_tokens", "cacheRead", "cache_read_input_tokens"),
+            "cache_write": ("cache_write_tokens", "cacheWrite"),
+        },
+        "note": "state.db is canonical; legacy JSONL is read when present. Hermes mirrors the shared skill library.",
+        "skills": ("~/.hermes/skills", "~/.agents/skills"),
+        "native_skill_dir": ".hermes/skills",
+    },
     "crush": {
         "label": "Crush",
         "sessions": "~/.local/share/crush",
@@ -1378,6 +1440,77 @@ def _dig(obj: Any, path: tuple[str, ...]) -> dict[str, Any] | None:
 
 def _int(value: Any) -> int:
     return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _read_sqlite_usage(
+    spec: dict[str, Any], root: Path, cutoff: float | None
+) -> tuple[dict[str, int], int, str]:
+    """Read token totals from a host's SQLite store.
+
+    Python's `sqlite3` is in the standard library, so this adds no dependency —
+    which matters because the whole tool is built on zero third-party packages.
+    Databases are opened read-only via URI, and an unreadable or absent database
+    yields a stated reason rather than a zero.
+    """
+    import sqlite3
+
+    conf = spec.get("sqlite")
+    if not conf:
+        return {k: 0 for k in TOKEN_FIELDS}, 0, ""
+
+    base = (root / str(conf["path"]).lstrip("~/")).expanduser()
+    if not base.is_dir():
+        return {k: 0 for k in TOKEN_FIELDS}, 0, "sqlite directory not found"
+
+    targets: list[Path] = []
+    for pattern in [conf.get("glob", "*.db")] if isinstance(conf.get("glob"), str) else (conf.get("glob") or ("*.db",)):
+        targets.extend(base.glob(pattern))
+
+    totals = {k: 0 for k in TOKEN_FIELDS}
+    rows_read = 0
+    last_error = ""
+    for db in targets:
+        try:
+            if not db.is_file() or (cutoff and db.stat().st_mtime < cutoff):
+                continue
+        except OSError:
+            continue
+        try:
+            uri = f"file:{db.as_posix()}?mode=ro"
+            with sqlite3.connect(uri, uri=True, timeout=2) as conn:
+                conn.row_factory = sqlite3.Row
+                table = conf.get("table", "sessions")
+                # The table may not exist yet (a host that has never run).
+                exists = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name = ?",
+                    (table,),
+                ).fetchone()
+                if not exists:
+                    last_error = f"{db.name} has no '{table}' table yet"
+                    continue
+                present = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+                if not present:
+                    continue
+                select_cols = {"input": None, "output": None, "cache_read": None, "cache_write": None}
+                for bucket, names in (conf.get("columns") or {}).items():
+                    for name in names:
+                        if name in present:
+                            select_cols[bucket] = name
+                            break
+                chosen = [c for c in select_cols.values() if c]
+                if not chosen:
+                    last_error = f"{db.name}:{table} exposes none of the expected token columns"
+                    continue
+                sql = f"SELECT {', '.join(sorted(set(chosen)))} FROM {table}"
+                for row in conn.execute(sql):
+                    rows_read += 1
+                    for bucket, col in select_cols.items():
+                        if col:
+                            totals[bucket] += _int(row[col])
+        except Exception as e:  # noqa: BLE001 - sqlite raises many types
+            last_error = f"{db.name}: {type(e).__name__}"
+            continue
+    return totals, rows_read, last_error
 
 
 def _sum_aliases(usage: dict[str, Any], aliases: dict[str, tuple[str, ...]]) -> dict[str, int]:
@@ -1513,6 +1646,16 @@ def collect_host_usage(
             # A JSON-array file is processed line-by-line above; that is harmless
             # because a pretty-printed array simply fails to parse per line.
 
+        # Hosts whose canonical store is SQLite contribute here. Their JSONL may
+        # be legacy and empty, so this is not optional for them.
+        sqlite_note = ""
+        if spec.get("sqlite"):
+            sq_totals, sq_rows, sqlite_note = _read_sqlite_usage(spec, root, cutoff)
+            if sq_rows:
+                for key in TOKEN_FIELDS:
+                    totals[key] += sq_totals[key]
+                messages += sq_rows
+
         measurable = messages > 0
         billable = totals["input"] + totals["output"] + totals["cache_write"]
         record_out = {
@@ -1528,9 +1671,11 @@ def collect_host_usage(
             "billable_tokens_excluding_cache_read": billable if measurable else UNAVAILABLE,
             "provenance": "read directly from host session files" if measurable else UNAVAILABLE,
             "reason": "" if measurable else (
-                reason or "session files found but none contained a usage block this adapter recognises; "
-                          "the format may have changed"
+                sqlite_note or reason or
+                "session files found but none contained a usage block this adapter recognises; "
+                "the format may have changed"
             ),
+            "sqlite_note": sqlite_note,
             "price_note": PRICE_HINT,
         }
         if spec.get("note"):
@@ -1573,12 +1718,26 @@ REPAIRABLE = ("missing_frontmatter", "description_too_long", "allowed_tools_list
 
 
 def _read_safe(path: Path) -> str | None:
+    """Read a file as text with line endings normalised to '\\n'.
+
+    Python's text mode already translates CRLF, which makes every comparison
+    CRLF-safe — but it also *erases the evidence* of which convention the file
+    used. Repairs need that evidence to write the file back the way it was
+    found, so it is captured separately via `_uses_crlf`.
+    """
     try:
-        # newline="" keeps CRLF intact, but every comparison below then has to
-        # tolerate "\r". Normalizing here instead makes all callers CRLF-proof.
         return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
+
+
+def _uses_crlf(path: Path) -> bool:
+    """Whether the file on disk actually uses CRLF, regardless of translation."""
+    try:
+        with path.open("rb") as handle:
+            return b"\r\n" in handle.read(65536)
+    except OSError:
+        return False
 
 
 def declared_skill_name(path: Path) -> str | None:
@@ -1658,19 +1817,39 @@ def diagnose_skill(path: Path) -> dict[str, Any]:
             }
         return {"kind": "ok", "repairable": False, "detail": ""}
 
-    # Zero-dependency fallback: catch only what is unambiguously broken.
+    # Zero-dependency fallback. PyYAML may be absent (the project ships no
+    # third-party packages, and CI verifies that), so the checks here are
+    # textual. They must still detect the same repairable conditions, or a
+    # skill would silently pass on Linux CI and fail on a dev machine with
+    # PyYAML installed. Both paths must agree.
+    front_text = "\n".join(lines[1:end])
+    block = re.search(r"^allowed-tools:[ \t]*(?:#[^\r\n]*)?$", front_text, re.M)
+    if block and re.search(r"^[ \t]+-[ \t]*\S", front_text, re.M):
+        return {
+            "kind": "allowed_tools_list",
+            "repairable": True,
+            "detail": "allowed-tools is a list; the spec defines a space-separated string",
+        }
     for index, line in enumerate(lines[1:end], start=2):
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or line[0].isspace():
             continue
         if ":" in stripped:
             key, _, value = stripped.partition(":")
-            if key.strip() == "description" and len(value.strip().strip("\"'")) > 1024:
-                return {
-                    "kind": "description_too_long",
-                    "repairable": True,
-                    "detail": f"description exceeds 1024 chars at line {index}",
-                }
+            if key.strip() == "description":
+                # Block scalars (| / >) fold to a long line; count their extent.
+                measured = len(value.strip().strip("\"'"))
+                if measured <= 1024 and value.strip()[:1] in ("|", ">"):
+                    j = index
+                    while j < len(lines) and (not lines[j].strip() or lines[j][:1].isspace()):
+                        measured += len(lines[j].strip())
+                        j += 1
+                if measured > 1024:
+                    return {
+                        "kind": "description_too_long",
+                        "repairable": True,
+                        "detail": f"description is {measured} chars; the spec limit is 1024",
+                    }
         else:
             return {
                 "kind": "invalid_yaml",
@@ -1680,6 +1859,104 @@ def diagnose_skill(path: Path) -> dict[str, Any]:
     return {"kind": "ok", "repairable": False, "detail": ""}
 
 
+def _fence_index(lines: list[str]) -> tuple[int, int]:
+    """Locate the frontmatter body and everything after the closing fence."""
+    if not lines or lines[0].strip() != "---":
+        return -1, -1
+    end = next((i for i, line in enumerate(lines[1:201], start=1) if line.strip() == "---"), -1)
+    return end, (end + 1 if end > 0 else -1)
+
+
+def _truncate_description_textually(
+    path: Path, front: list[str], body: list[str], original_text: str
+) -> tuple[bool, str]:
+    """Cut an over-long description without a YAML library.
+
+    The project ships zero third-party packages and CI proves it, so every
+    repair has to work with the standard library alone. This replaces only the
+    description field, in place, leaving every other key byte-identical.
+    """
+    crlf = _uses_crlf(path)
+    out: list[str] = []
+    index = 0
+    total = 0
+    truncated_from = 0
+    while index < len(front):
+        line = front[index]
+        stripped = line.strip()
+        if stripped.startswith("description:") and not line[:1].isspace():
+            value = stripped.split(":", 1)[1].strip()
+            indent = line[: len(line) - len(line.lstrip())]
+            if value[:1] in ("|", ">"):
+                # Folded block: consume the indented continuation lines.
+                j = index + 1
+                block = [value]
+                while j < len(front) and (not front[j].strip() or front[j][:1].isspace()):
+                    block.append(front[j].strip())
+                    j += 1
+                joined = " ".join(p for p in block if p).strip()
+                truncated_from = len(joined)
+                out.append(f"{indent}description: {joined[:1000].rstrip()}…")
+                index = j
+                continue
+            plain = value.strip("\"'")
+            truncated_from = len(plain)
+            out.append(f"{indent}description: {plain[:1000].rstrip()}…")
+            index += 1
+            continue
+        out.append(line)
+        index += 1
+        total += len(line)
+
+    document = "---\n" + "\n".join(out) + "\n---\n"
+    if any(b.strip() for b in body):
+        document += "\n" + "\n".join(body).rstrip() + "\n"
+    path.write_text(
+        document.replace("\n", "\r\n") if crlf else document, encoding="utf-8", newline=""
+    )
+    return True, f"truncated description from {truncated_from} to 1000 chars"
+
+
+def _repair_allowed_tools_textually(path: Path, front: list[str], body: list[str], text: str) -> tuple[bool, str]:
+    """Flatten a list-style allowed-tools into the spec's space-separated string."""
+    crlf = _uses_crlf(path)
+    out: list[str] = []
+    index = 0
+    items: list[str] = []
+    while index < len(front):
+        line = front[index]
+        stripped = line.strip()
+        if stripped.startswith("allowed-tools:") and not line[:1].isspace():
+            indent = line[: len(line) - len(line.lstrip())]
+            inline = stripped.split(":", 1)[1].strip()
+            if inline:
+                out.append(f"{indent}allowed-tools: {inline.strip(chr(34) + chr(39))}")
+                index += 1
+                continue
+            items = []
+            j = index + 1
+            while j < len(front) and front[j][:1].isspace():
+                candidate = front[j].strip()
+                if candidate.startswith("-"):
+                    items.append(candidate[1:].strip().strip(chr(34) + chr(39)))
+                j += 1
+            if not items:
+                return False, "no list items found under allowed-tools"
+            out.append(f"{indent}allowed-tools: {' '.join(items)}")
+            index = j
+            continue
+        out.append(line)
+        index += 1
+
+    document = "---\n" + "\n".join(out) + "\n---\n"
+    if any(b.strip() for b in body):
+        document += "\n" + "\n".join(body).rstrip() + "\n"
+    path.write_text(
+        document.replace("\n", "\r\n") if crlf else document, encoding="utf-8", newline=""
+    )
+    return True, "converted allowed-tools to the spec's space-separated string"
+
+
 def repair_skill(path: Path, kind: str) -> tuple[bool, str]:
     """Apply a conservative, in-place repair. Returns (changed, note)."""
     text = _read_safe(path)
@@ -1687,37 +1964,44 @@ def repair_skill(path: Path, kind: str) -> tuple[bool, str]:
         return False, "unreadable"
 
     if kind == "description_too_long":
-        try:
-            import yaml  # type: ignore[import-not-found]
-        except ImportError:
-            return False, "needs PyYAML to rewrite frontmatter safely"
         lines = text.splitlines()
         end = next((i for i, line in enumerate(lines[1:101], start=1) if line.strip() == "---"), -1)
         if end < 0:
             return False, "no closing fence"
-        parsed = yaml.safe_load("\n".join(lines[1:end])) or {}
+        front = lines[1:end]
+        body = lines[end + 1:]
+        try:
+            import yaml  # type: ignore[import-not-found]
+        except ImportError:
+            return _truncate_description_textually(path, front, body, text)
+        parsed = yaml.safe_load("\n".join(front)) or {}
         original = str(parsed.get("description", ""))
         # Truncate on a character boundary and state plainly that it was cut.
         parsed["description"] = original[:1000].rstrip() + "…"
-        body = "\n".join(lines[end + 1:])
         updated = (
             "---\n"
             + yaml.safe_dump(parsed, allow_unicode=True, sort_keys=False, default_flow_style=False).rstrip()
             + "\n---"
-            + ("\n" + body if body.strip() else "\n")
+            + ("\n" + "\n".join(body) if any(b.strip() for b in body) else "\n")
         )
         path.write_text(updated, encoding="utf-8")
         return True, f"truncated description from {len(original)} to 1000 chars"
 
     if kind == "allowed_tools_list":
+        # Windows checkouts are frequently CRLF; a regex written against bare
+        # \n silently fails to match, which looks like "repair did nothing".
+        crlf = _uses_crlf(path)
+        body = text.replace("\r\n", "\n")
+        fence, _ = _fence_index(body.splitlines())
+        lines = body.splitlines()
         try:
             import yaml  # type: ignore[import-not-found]
         except ImportError:
-            return False, "needs PyYAML to rewrite frontmatter safely"
-        # Windows checkouts are frequently CRLF; a regex written against bare
-        # \n silently fails to match, which looks like "repair did nothing".
-        crlf = "\r\n" in text
-        body = text.replace("\r\n", "\n")
+            if fence < 0:
+                return False, "no closing fence"
+            return _repair_allowed_tools_textually(
+                path, lines[1:fence], lines[fence + 1:], text
+            )
         # Anchoring at the opening fence avoids the greedy list match eating
         # text that sits before it.
         start = body.find("---")

@@ -21,7 +21,28 @@ jobs:
         run: python skills/aletheia/scripts/router.py lint --root skills
       - name: Zero-dependency YAML fallback lint
         run: python -S skills/aletheia/scripts/router.py lint --root skills
+      # The runner has no PyYAML, which is exactly why this exists: the
+      # no-dependency parser must reach the same verdict as the PyYAML one.
+      # Without it, a skill can pass locally and fail only on Linux CI.
+      - name: Zero-dependency parity check
+        run: python tests/zero_dependency_check.py
       - name: Routing smoke evaluation
         run: python skills/aletheia/scripts/router.py eval --root tests/fixtures --cases tests/eval_cases.json
       - name: Compile Python
         run: python -m compileall -q skills/aletheia/scripts scripts
+
+  no-pyyaml:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # Prove the standard library is genuinely enough: PyYAML installed here
+      # would mask exactly the bug this job exists to catch.
+      - name: Full test suite without PyYAML
+        run: python tests/zero_dependency_check.py
+      - name: Discovery works with the standard library alone
+        run: python skills/aletheia/scripts/router.py scan --root tests/fixtures --json
+      - name: Hosts and skills resolvable without third-party packages
+        run: python skills/aletheia/scripts/router.py hosts

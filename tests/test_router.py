@@ -731,6 +731,119 @@ class RouterTests(unittest.TestCase):
             self.assertTrue((ROOT / "skills/aletheia/references" / ref).is_file(),
                             f"SKILL.md references {ref}, which does not exist")
 
+    # --- Cross-platform behaviour -------------------------------------------------
+    # Windows, macOS and Linux disagree about line endings, path separators and
+    # sqlite locking. A feature that only works on the developer's machine is not
+    # a feature; these tests pin the behaviour on all three.
+
+    def test_repair_preserves_line_ending_convention(self):
+        """CRLF in must yield CRLF out; LF must stay LF.
+
+        Rewriting a Windows file with LF endings makes the whole file appear
+        changed in review, and some tools mis-parse it.
+        """
+        for newline, label in (("\n", "LF"), ("\r\n", "CRLF")):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                d = root / "listtools"
+                d.mkdir()
+                lines = ["---", "name: listtools", "description: Uses a list.",
+                         "allowed-tools:", "  - Bash(git:*)", "  - Read", "---", "", "# body", ""]
+                target = d / "SKILL.md"
+                with target.open("w", encoding="utf-8", newline="") as handle:
+                    handle.write(newline.join(lines))
+                changed, note = router.repair_skill(target, "allowed_tools_list")
+                self.assertTrue(changed, f"{label}: {note}")
+                raw = target.read_bytes().decode("utf-8")
+                self.assertEqual("ok", router.diagnose_skill(target)["kind"], f"{label} must parse clean")
+                if newline == "\r\n":
+                    self.assertIn("\r\n", raw, "CRLF must be preserved on a CRLF file")
+                else:
+                    self.assertNotIn("\r\n", raw, "LF file must not gain CRLF")
+                self.assertIn("# body", raw)
+
+    def test_paths_are_handled_with_both_separators(self):
+        """Relative and native paths must resolve to the same skill."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            d = root / "pdf-processing"
+            d.mkdir()
+            (d / "SKILL.md").write_text(
+                "---\nname: pdf-processing\ndescription: Extract text and tables from PDF files.\n---\n# body\n",
+                encoding="utf-8",
+            )
+            direct, _ = router.discover([d])
+            self.assertEqual(["pdf-processing"], [s.name for s in direct])
+            # A path carrying backslashes must still work on POSIX, and a POSIX
+            # path on Windows, because users type both.
+            for variant in (str(d).replace("/", "\\"), str(d).replace("\\", "/")):
+                skills, _ = router.discover([Path(variant)])
+                self.assertEqual(["pdf-processing"], [s.name for s in skills], variant)
+
+    def test_sqlite_reading_is_readonly_and_portable(self):
+        """SQLite is stdlib, so hosts storing usage there are readable everywhere.
+
+        Opened read-only via URI: a telemetry reader must never mutate or lock a
+        host's database.
+        """
+        import sqlite3
+
+        # ignore_cleanup_errors: a .db can still be held open by the OS on
+        # Windows at teardown, and that must not fail an unrelated assertion.
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            base = Path(tmp)
+            db_dir = base / ".hermes"
+            db_dir.mkdir()
+            db = db_dir / "state.db"
+            with sqlite3.connect(db) as conn:
+                conn.execute("CREATE TABLE sessions (id TEXT, input_tokens INT, output_tokens INT)")
+                conn.execute("INSERT INTO sessions VALUES ('a', 100, 20)")
+                conn.execute("INSERT INTO sessions VALUES ('b', 300, 40)")
+            before = db.stat().st_mtime
+
+            usage = router.collect_host_usage(base=base, hosts=("hermes",))
+            self.assertTrue(usage["hermes"]["available"], usage["hermes"].get("reason"))
+            self.assertEqual(400, usage["hermes"]["input_tokens"])
+            self.assertEqual(60, usage["hermes"]["output_tokens"])
+            # Read-only: the file must be untouched.
+            self.assertEqual(before, db.stat().st_mtime)
+
+    def test_sqlite_missing_table_reports_a_reason_not_zero(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            import sqlite3
+
+            base = Path(tmp)
+            db_dir = base / ".openclaw"
+            db_dir.mkdir()
+            with sqlite3.connect(db_dir / "x.db") as conn:
+                conn.execute("CREATE TABLE something_else (a INT)")
+            usage = router.collect_host_usage(base=base, hosts=("openclaw",))
+            self.assertFalse(usage["openclaw"]["available"])
+            self.assertEqual(router.UNAVAILABLE, usage["openclaw"]["input_tokens"])
+            self.assertTrue(usage["openclaw"]["reason"], "a missing store must state why")
+
+    def test_registry_includes_the_multi_agent_hosts(self):
+        """Hermes and OpenClaw share a skill library and must be visible to it."""
+        for expected in ("hermes", "openclaw"):
+            self.assertIn(expected, router.TELEMETRY_HOSTS)
+            self.assertTrue(
+                router.TELEMETRY_HOSTS[expected]["skills"],
+                f"{expected} must declare its skill directories",
+            )
+
+    def test_audit_and_telemetry_work_without_pyyaml(self):
+        """The project ships zero dependencies; core paths must not need PyYAML.
+
+        Guards against a future 'import yaml' creeping into discovery or repair
+        and failing only on CI, where PyYAML is absent.
+        """
+        import subprocess
+        script = ROOT / "tests" / "zero_dependency_check.py"
+        proc = subprocess.run(
+            [sys.executable, str(script)], capture_output=True, text=True, cwd=str(ROOT)
+        )
+        self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+
     def test_repair_handles_crlf_without_corrupting(self):
         """Windows checkouts are CRLF; a bare-\\n regex silently fails there."""
         with tempfile.TemporaryDirectory() as tmp:

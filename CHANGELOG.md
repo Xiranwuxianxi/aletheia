@@ -4,6 +4,63 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.8.0 — 2026-10-16
+
+Adds Hermes and OpenClaw, and fixes two portability bugs that only CI could see.
+
+### Added
+
+- **OpenClaw and Hermes adapters** — 14 hosts registered. Both keep usage in
+  **SQLite**, so the adapters read it directly. Python's `sqlite3` is standard
+  library, so this adds **no dependency**; the zero-dependency guarantee holds.
+  Databases are opened **read-only via URI**, because a telemetry reader must
+  never mutate or lock a host's store.
+- A declarative `sqlite` block per host: path, glob, table and column aliases,
+  mapped onto the same canonical buckets as the JSON adapters.
+- **Multi-agent skill discovery.** Both agents keep their own `skills/`
+  directory, and in practice these mirror the WorkBuddy library. On this machine
+  OpenClaw's 13 skills were previously **completely invisible**; Hermes holds
+  194 of 201. Both are now reachable.
+- `tests/zero_dependency_check.py`: 13 assertions proving the no-PyYAML path
+  reaches the same verdict as the PyYAML path.
+- A CI job (`no-pyyaml`) that runs the full check with only the standard
+  library, plus a parity step in the main matrix.
+- Cross-platform tests: CRLF preservation, mixed path separators, SQLite
+  read-only semantics, and a missing-table case.
+
+### Fixed
+
+- **CRLF was silently lost on every repair.** Python's text mode translates CRLF
+  to LF when reading, which makes every comparison CRLF-safe but also *erases the
+  evidence* of which convention the file used — so repaired files always came
+  back as LF, showing as a whole-file diff on Windows. The convention is now read
+  from the bytes on disk and preserved.
+- **The no-dependency path disagreed with the PyYAML path.** A list-style
+  `allowed-tools` was classified `invalid_yaml` without PyYAML (items were
+  silently dropped by the fallback parser) but `allowed_tools_list` with it. That
+  is why CI failed while every local run passed. Both paths now detect the same
+  conditions, and repairs work without PyYAML at all — the fallback parser
+  collects block sequences instead of discarding them, and two textual repairers
+  replace the ones that required a YAML library.
+- Over-long descriptions in **folded block scalars** (`description: >`) were not
+  detected without PyYAML, because only the first line was measured.
+
+### Measured on this machine
+
+`960 installed → 252 unique (708 duplicate installs)`. Auditing just the two new
+agents: `213 scanned, 210 healthy, 3 broken, 17 duplicated` — the duplication
+being a genuine finding, since a library mirrored across agents drifts.
+
+### Notes
+
+- SQLite teardown on Windows can leave a file briefly held open, so those two
+  tests use `ignore_cleanup_errors` — otherwise a locked handle fails an
+  unrelated assertion.
+- Adapters track each tool's file format. An unrecognised layout, missing table
+  or absent column reports `unavailable` with the reason — never a zero.
+
+72 tests pass.
+
 ## 1.7.1 — 2026-10-15
 
 Structure fix in `SKILL.md`, found by measuring instead of assuming.

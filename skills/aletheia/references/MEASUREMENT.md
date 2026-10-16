@@ -24,12 +24,50 @@ python scripts/router.py telemetry --host claude --host kimi
 | Qwen Code | `.qwen/skills` | yes | `~/.qwen/projects/**/*.jsonl` | `usageMetadata` |
 | Gemini CLI | `.gemini/extensions` | yes | `~/.gemini/tmp/*/chats/*` | `usageMetadata` |
 | Copilot CLI | `.copilot/skills` | yes | `~/.copilot/{otel,session-state}` | `usage` / `data.usage` |
-| OpenCode | `.opencode/skills` | partial | `~/.local/share/opencode/storage/message/**` | `tokens` (SQLite not read) |
+| **OpenClaw** | `.openclaw/skills` | SQLite | per-agent SQLite + legacy JSONL | `message.usage` |
+| **Hermes** | `.hermes/skills` | SQLite | `~/.hermes/state.db` (`sessions` table) | column-based |
+| OpenCode | `.opencode/skills` | partial | JSON message store | `tokens` |
 | Droid | `.factory/skills` | yes | `~/.factory/sessions/*.json` | `usage` |
 | Kiro | `.kiro/skills` | yes | `~/.kiro/sessions/cli/*.json` | `usage` |
 | Crush | `.crush/skills` | yes | `~/.local/share/crush/projects.json` | `usage` / `totals` |
 | Aider | `.aider/skills` | if enabled | `~/.aider/**/*.jsonl` | `usage` |
 | WorkBuddy | `.workbuddy/skills` | **no** | persists nothing | — |
+
+### SQLite-backed hosts
+
+**OpenClaw and Hermes keep usage in SQLite**, not JSON. Python's `sqlite3` is in
+the standard library, so Aletheia reads them directly — **no third-party driver,
+no new dependency**. Databases are opened **read-only via URI**, because a
+telemetry reader must never mutate or lock a host's store.
+
+The adapter maps column names onto the same canonical buckets:
+
+```python
+"sqlite": {
+    "path": "~/.hermes", "glob": "state.db", "table": "sessions",
+    "columns": {"input": ("input_tokens", "prompt_tokens"), ...},
+}
+```
+
+If the table or any expected column is missing, the host reports `unavailable`
+with the reason — never a zero.
+
+### Multi-agent skill libraries
+
+Hermes and OpenClaw each maintain their **own** `skills/` directory, and in
+practice these mirror the WorkBuddy library. That is a real operational fact,
+not an edge case: a library shared across agents accumulates duplicates and
+drifts. The audit surfaces it:
+
+```text
+$ router.py audit --root ~/.hermes/skills --root ~/.openclaw/skills
+  scanned 213 skill(s)
+  healthy 210   broken 3 (blocking 0)   stale 2   duplicated 17
+```
+
+Inventory de-duplicates by name, so a quoted number never points at an ambiguous
+pair — but the count of duplicate *installs* is reported honestly, because that
+is the thing worth acting on.
 
 ### Every host names its fields differently
 
@@ -264,3 +302,35 @@ adding one.
 5. Savings claims that need an A/B run are refused, with the reason given.
 6. `--actual-tokens` is supplied by the human, never derived.
 7. Nothing is deleted automatically — ever.
+
+## Running on Windows, macOS and Linux
+
+Aletheia is standard-library only, so there is nothing to install on any of the
+three. The differences that do exist are handled explicitly rather than assumed:
+
+| Concern | Windows | macOS / Linux |
+| --- | --- | --- |
+| Line endings | CRLF preserved on repair | LF preserved on repair |
+| Path separators | both `\` and `/` accepted | both accepted |
+| Config home | `%USERPROFILE%` via `Path.home()` | `$HOME` |
+| sqlite lock semantics | connections closed before teardown | advisory locks |
+| Terminal glyphs | ASCII bar fallback | box-drawing bar |
+
+Two of these were real bugs, found by CI rather than by review:
+
+- **CRLF was silently lost on repair.** Python's text mode translates CRLF to LF
+  when reading, which made every comparison CRLF-safe but also *erased the
+  evidence* of which convention the file used. Every repaired file came back as
+  LF — showing as a whole-file diff on Windows. Now the original convention is
+  read from the bytes on disk and preserved.
+- **The no-dependency path disagreed with the PyYAML path.** Locally PyYAML is
+  present, so `diagnose_skill` reached a different verdict than it would without
+  it — meaning a skill could pass on a developer machine and fail only on CI.
+  Both paths must now agree, and `tests/zero_dependency_check.py` proves it.
+
+### Why this matters beyond tidiness
+
+A feature that works only on the machine where it was written is not a feature.
+The zero-dependency guarantee is load-bearing: it is what lets Aletheia run in a
+fresh CI container, inside another agent's sandbox, or on a host with no package
+manager — which is exactly where a routing tool is most useful.
