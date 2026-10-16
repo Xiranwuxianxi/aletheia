@@ -36,16 +36,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      # Run the suite, and on failure print the interpreter context plus the
+      # failing assertions into the same log. `if: failure()` on a later step is
+      # unreliable here; doing it inline guarantees the detail is captured.
       - name: Unit tests
-        run: python -m unittest discover -s tests -v
-      # When a test fails here, print the assertion and the interpreter context
-      # into the log. A bare "FAILED (failures=2)" does not say which platform
-      # behaviour diverged, and reading that back costs a round trip.
-      - name: Show failure detail
-        if: failure()
+        shell: bash
         run: |
-          python -c "import platform,sys;print('python',sys.version);print('platform',platform.platform());print('machine',platform.machine())"
-          python -m unittest discover -s tests 2>&1 | tail -60 || true
+          set -o pipefail
+          python -m unittest discover -s tests -v 2>&1 | tee /tmp/tests.log || {
+            echo "::group::environment"
+            python -c "import platform,sys;print('python',sys.version.replace(chr(10),' '));print('platform',platform.platform());print('machine',platform.machine())"
+            echo "cwd: $(pwd)"
+            echo "::endgroup::"
+            echo "::group::failure detail"
+            grep -E "^(FAIL|ERROR):|^AssertionError|^Ran |^FAILED|skipTest|Error:" /tmp/tests.log | head -40
+            echo "::endgroup::"
+            exit 1
+          }
       - name: Skill metadata lint
         run: python skills/aletheia/scripts/router.py lint --root skills
       - name: Zero-dependency YAML fallback lint
