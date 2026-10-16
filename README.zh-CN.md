@@ -448,7 +448,7 @@ python skills/aletheia/scripts/router.py mode
 python skills/aletheia/scripts/router.py mode --set manual
 
 # 发现约定目录中的技能
-python skills/aletheia/scripts/router.py scan --json
+python skills/aletheia/scripts/router.py scan
 
 # 带理由的候选召回
 python skills/aletheia/scripts/router.py route "分析这个表格" --top 5
@@ -471,6 +471,11 @@ python skills/aletheia/scripts/router.py progress "read" "write" "verify" --done
 # 单元测试
 python -m unittest discover -s tests -v
 ```
+
+所有子命令**一律向 stdout 输出 JSON** —— 没有 `--json` 参数，因为不存在其他格式。
+失败时输出 `{"error": "..."}` 并以 `2` 退出。
+argparse 仍负责真正的参数解析错误（未知子命令、缺参数），因为那发生在命令语义之前，
+用它的用法提示才对。
 
 `route` 绝不执行被发现的 Skill。`score` 是人工设计的排序信号 —— 不是概率、
 不是成功率、也未经统计校准。请先读候选的 `SKILL.md` 再决定。

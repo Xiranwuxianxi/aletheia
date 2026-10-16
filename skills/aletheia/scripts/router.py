@@ -2600,6 +2600,22 @@ def active_measurement(
     }
 
 
+def fail(message: str, code: int = 2) -> int:
+    """Report a business-logic failure in the one protocol this CLI has.
+
+    Everything here speaks JSON on stdout with a non-zero exit, so a consumer
+    parses one shape. `parser.error` was previously mixed in for the same class
+    of failure, which meant a caller had to handle both stderr text and JSON —
+    and machine callers generally only handle one.
+
+    Argparse still owns genuine argument-parsing errors (unknown subcommand,
+    missing required value): those happen before any command semantics exist,
+    and its usage message is the right answer there.
+    """
+    print(json.dumps({"error": message}, ensure_ascii=False, indent=2))
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Read-only, local Agent Skills discovery & routing hints")
     parser.add_argument("--version", action="version", version=VERSION)
@@ -2607,7 +2623,6 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("scan", "route", "lint"):
         cmd = sub.add_parser(name)
         cmd.add_argument("--root", action="append", default=[], help="skill parent directory, repeatable; no root means conventional local paths")
-        cmd.add_argument("--json", action="store_true", help="machine-readable output (default for route)")
         cmd.add_argument("--only", action="append", default=[], help="restrict to these skill names (comma/space separated)")
         cmd.add_argument("--session", type=Path, default=None, help="session manifest JSON restricting this session's skills")
         cmd.add_argument("--scope-detail", action="store_true", help="list every suppressed skill name (costs context; default is a count)")
@@ -2861,8 +2876,7 @@ def main(argv: list[str] | None = None) -> int:
                 ascii_only=args.ascii,
             )
         except SkillError as e:
-            print(json.dumps({"error": str(e)}, ensure_ascii=False, indent=2))
-            return 2
+            return fail(str(e))
         print(payload["line"])
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
@@ -2870,10 +2884,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "context":
         transcripts = args.transcripts.expanduser() if args.transcripts else Path.home()
         if not transcripts.is_dir():
-            print(json.dumps({"error": f"transcript directory not found: {transcripts}"}, indent=2))
-            return 2
+            return fail(f"transcript directory not found: {transcripts}")
         if args.window <= 0:
-            parser.error("--window must be > 0")
+            return fail("--window must be > 0")
         print(json.dumps(context_pressure(transcripts, args.host, args.window, args.since_minutes), ensure_ascii=False, indent=2))
         return 0
 
@@ -2893,8 +2906,7 @@ def main(argv: list[str] | None = None) -> int:
             scope_manifest = load_session_manifest(manifest_path)
             profile_names = load_profile(profile_name) if profile_name else None
         except SkillError as e:
-            print(json.dumps({"error": str(e)}, ensure_ascii=False, indent=2))
-            return 2
+            return fail(str(e))
         if scope_manifest is not None:
             declared = scope_manifest.get("only") or scope_manifest.get("allowed_skills")
             scope_names = parse_scope(declared if isinstance(declared, list) else ([declared] if isinstance(declared, str) else None))
@@ -2932,7 +2944,7 @@ def main(argv: list[str] | None = None) -> int:
         payload = {"valid": len(skills), "invalid_or_warnings": issues, "ok": not issues, "scope": scope_payload}
     elif args.command == "route":
         if args.top <= 0 or args.threshold < 0:
-            parser.error("--top must be > 0; --threshold must be >= 0")
+            return fail("--top must be > 0; --threshold must be >= 0")
         payload = route(args.task, skills, args.top, args.threshold)
         payload["issues"] = issues
         payload["scope"] = scope_payload
@@ -2941,12 +2953,12 @@ def main(argv: list[str] | None = None) -> int:
             cases = json.loads(Path(args.cases).read_text(encoding="utf-8"))
             assert isinstance(cases, list)
         except (OSError, ValueError, AssertionError) as e:
-            parser.error(f"invalid case file: {e}")
+            return fail(f"invalid case file: {e}")
         details = []
         passed = 0
         for case in cases:
             if not isinstance(case, dict) or not isinstance(case.get("task"), str) or not isinstance(case.get("expect"), list):
-                parser.error("each case must have task:string and expect:string[]")
+                return fail("each case must have task:string and expect:string[]")
             results = route(case["task"], skills, EVAL_TOP, DEFAULT_THRESHOLD)
             got = [s["name"] for s in results["candidates"]]
             want = case["expect"]

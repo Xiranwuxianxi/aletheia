@@ -805,6 +805,90 @@ class RouterTests(unittest.TestCase):
             self.assertEqual({"files_changed", "bytes_written", "since_hours"}, numeric_keys)
             self.assertIn("cannot be converted", entry["interpretation"])
 
+    def test_business_errors_are_json_on_stdout_with_exit_2(self):
+        """One error protocol, so a machine caller parses one shape.
+
+        `parser.error` used to be mixed in for the same class of failure, which
+        meant stderr text on one path and JSON on another. Machine callers
+        generally handle only one.
+        """
+        import subprocess
+
+        router_py = ROOT / "skills/aletheia/scripts/router.py"
+        cases = [
+            (["context", "--transcripts", "/definitely-not-here", "--window", "10"], "missing directory"),
+            (["route", "task", "--top", "0"], "non-positive --top"),
+            (["context", "--transcripts", str(ROOT), "--window", "0"], "non-positive --window"),
+        ]
+        for argv, label in cases:
+            proc = subprocess.run(
+                [sys.executable, "-B", str(router_py), *argv],
+                capture_output=True, text=True, cwd=str(ROOT),
+            )
+            self.assertEqual(2, proc.returncode, f"{label}: exit code")
+            payload = json.loads(proc.stdout)  # must be valid JSON on stdout
+            self.assertIn("error", payload, f"{label}: missing 'error' key")
+            self.assertTrue(payload["error"], f"{label}: empty error message")
+
+    def test_scan_route_lint_have_no_dead_json_flag(self):
+        """A flag that is defined but never read is worse than no flag at all."""
+        import subprocess
+
+        router_py = ROOT / "skills/aletheia/scripts/router.py"
+        # `route` takes a positional task, so supply one — otherwise argparse
+        # stops at the missing argument and never reaches --json.
+        cases = [
+            (["scan"], "scan"),
+            (["route", "some task"], "route"),
+            (["lint"], "lint"),
+        ]
+        for argv, name in cases:
+            proc = subprocess.run(
+                [sys.executable, "-B", str(router_py), *argv, "--json"],
+                capture_output=True, text=True, cwd=str(ROOT),
+            )
+            # Argparse owns unknown-argument errors; the flag must be gone.
+            # The exact wording differs by platform ("unrecognized argument"
+            # vs "unrecognized arguments"), so match only the stable part.
+            self.assertNotEqual(0, proc.returncode, f"{name} --json should not be accepted")
+            self.assertIn("unrecognized", proc.stderr.lower())
+            self.assertIn("--json", proc.stderr)
+
+    def test_scope_sources_intersect_rather_than_override(self):
+        """The docs and the code must agree: multiple sources intersect."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("alpha", "beta", "gamma"):
+                d = root / name
+                d.mkdir()
+                (d / "SKILL.md").write_text(
+                    f"---\nname: {name}\ndescription: Skill {name} for scoping.\n---\n# body\n",
+                    encoding="utf-8",
+                )
+            # --only names alpha+beta; the profile names only beta.
+            profile = root / "profiles"
+            profile.mkdir()
+            (profile / "narrow.json").write_text(
+                json.dumps(["beta"]), encoding="utf-8"
+            )
+            manifest = root / "aletheia-session.json"
+            manifest.write_text(json.dumps({"only": ["beta", "gamma"]}), encoding="utf-8")
+
+            skills, _ = router.discover([root])
+            # beta is in all three; alpha only in --only; gamma only in the
+            # manifest. Intersection is therefore just beta.
+            combined, _ = router.apply_scope(skills, {"alpha", "beta"} & {"beta", "gamma"})
+            self.assertEqual(["beta"], [s.name for s in combined])
+
+            # And the documented wording must not contradict itself.
+            for doc in ("README.md", "README.zh-CN.md",
+                        "skills/aletheia/SKILL.md",
+                        "skills/aletheia/references/TRANSPARENCY.md"):
+                text = (ROOT / doc).read_text(encoding="utf-8")
+                self.assertNotIn("overrides the manifest", text, f"{doc} still says override")
+                self.assertNotIn("overrides the others", text, f"{doc} still says override")
+                self.assertNotIn("优先于清单", text, f"{doc} still says override")
+
     def test_bilingual_readmes_stay_in_step(self):
         """The two READMEs must not drift apart silently.
 

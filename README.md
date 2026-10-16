@@ -495,7 +495,7 @@ python skills/aletheia/scripts/router.py mode
 python skills/aletheia/scripts/router.py mode --set manual
 
 # Discover skills in conventional locations
-python skills/aletheia/scripts/router.py scan --json
+python skills/aletheia/scripts/router.py scan
 
 # Retrieve candidates with reasons
 python skills/aletheia/scripts/router.py route "analyze this spreadsheet" --top 5
@@ -518,6 +518,12 @@ python skills/aletheia/scripts/router.py progress "read" "write" "verify" --done
 # Tests
 python -m unittest discover -s tests -v
 ```
+
+Every subcommand prints **JSON on stdout**, always — there is no `--json` flag
+because there is no other format. A failure prints `{"error": "..."}` and exits
+`2`. Argparse still handles genuine argument-parsing errors (an unknown
+subcommand, a missing value) with its own usage message, since those happen
+before any command semantics exist.
 
 `route` never executes a discovered skill. The `score` is a hand-tuned ordering
 signal — not a probability, not a success rate, and not calibrated. Read the
