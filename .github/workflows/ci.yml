@@ -38,6 +38,14 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Unit tests
         run: python -m unittest discover -s tests -v
+      # When a test fails here, print the assertion and the interpreter context
+      # into the log. A bare "FAILED (failures=2)" does not say which platform
+      # behaviour diverged, and reading that back costs a round trip.
+      - name: Show failure detail
+        if: failure()
+        run: |
+          python -c "import platform,sys;print('python',sys.version);print('platform',platform.platform());print('machine',platform.machine())"
+          python -m unittest discover -s tests 2>&1 | tail -60 || true
       - name: Skill metadata lint
         run: python skills/aletheia/scripts/router.py lint --root skills
       - name: Zero-dependency YAML fallback lint
