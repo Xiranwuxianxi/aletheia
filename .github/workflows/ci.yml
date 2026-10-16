@@ -62,6 +62,11 @@ jobs:
       # Without it, a skill can pass locally and fail only on Linux CI.
       - name: Zero-dependency parity check
         run: python tests/zero_dependency_check.py
+      # A guard that no longer fires is worse than no guard: it reports
+      # confidence it has not earned. This proves each check in the structural
+      # guards still detects the defect it was written for.
+      - name: Structural guards still fire
+        run: python -B tests/guard_selftest.py
       - name: Routing smoke evaluation
         run: python skills/aletheia/scripts/router.py eval --root tests/fixtures --cases tests/eval_cases.json
       - name: Compile Python

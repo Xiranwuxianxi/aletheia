@@ -137,7 +137,58 @@ class RouterTests(unittest.TestCase):
             nested.mkdir(parents=True)
             found = router.load_session_manifest(None, nested)
             self.assertIsNotNone(found)
-            self.assertEqual(str(manifest), found["_path"])
+            # Compare canonical forms, not raw spellings. One file has several
+            # legitimate spellings — macOS symlinks /var to /private/var, Windows
+            # short paths like RUNNER~1 expand to the long name — so comparing
+            # spellings asserts something false on two of three CI platforms
+            # while being accidentally true on the third. tempfile already hands
+            # back a canonical root on Windows but not on macOS, which is exactly
+            # why the comparison has to normalise rather than pick a side.
+            self.assertEqual(
+                manifest.resolve(), Path(found["_path"]).resolve(),
+                "the same file must be reported the same way regardless of how it was found",
+            )
+            # The reported spelling itself must already be canonical, or a caller
+            # that string-compares it against the path it passed in still breaks.
+            self.assertEqual(
+                str(Path(found["_path"])), str(Path(found["_path"]).resolve()),
+                "_path must not carry '..' or any other unresolved segment",
+            )
+
+    def test_session_manifest_path_is_canonical_however_it_was_named(self):
+        """`_path` must not depend on which route located the manifest.
+
+        The explicit and upward-search branches both hand back `_path`, and a
+        consumer compares it against the path it supplied. If one branch
+        resolves and the other does not, that comparison breaks wherever a
+        directory has two names — which is the normal state on macOS and on a
+        Windows runner, and never on a developer machine.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "aletheia-session.json"
+            manifest.write_text(json.dumps({"only": ["pdf-processing"]}), encoding="utf-8")
+
+            # Named via a non-canonical spelling: '.' and '..' must not survive.
+            (root / "a" / "b").mkdir(parents=True)
+            indirect = root / "a" / ".." / "aletheia-session.json"
+            explicit = router.load_session_manifest(indirect)
+            found = router.load_session_manifest(None, root / "a" / "b")
+
+            self.assertIsNotNone(found)
+            # Compare the raw values. Resolving both sides inside the test would
+            # normalise away the very difference under test, which is how a guard
+            # ends up passing on the defect it was written for.
+            self.assertEqual(
+                Path(explicit["_path"]),
+                Path(found["_path"]),
+                "explicit and discovered paths must agree as reported",
+            )
+            self.assertEqual(
+                Path(explicit["_path"]),
+                manifest.resolve(),
+                "_path must be canonical: 'a/..' must not survive into it",
+            )
 
     def test_malformed_session_manifest_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -709,6 +760,66 @@ class RouterTests(unittest.TestCase):
             "the separator test should exist and be discoverable by this guard",
         )
 
+    def test_reported_paths_are_canonical_and_consistent(self):
+        """Any path handed back as *data* must be canonical, not just usable.
+
+        Three CI rounds have now been lost to this class. One path has several
+        legitimate spellings: macOS symlinks /var to /private/var, Windows short
+        paths (RUNNER~1) expand to the long name, and '..' survives in any
+        string built by joining. None of it shows on a developer machine, where
+        tempdir already returns a canonical path.
+
+        The rule is structural, not name-based, because the two previous guards
+        matched on the word 'separator' and so missed a test that had no such
+        word in its name while failing for exactly that reason.
+        """
+        router_src = (ROOT / "skills/aletheia/scripts/router.py").read_text(encoding="utf-8")
+        test_src = (ROOT / "tests" / "test_router.py").read_text(encoding="utf-8")
+
+        # 0. A silently duplicated test is dead code that also silently orphans
+        #    whatever it was shadowing. Python keeps the last definition, so the
+        #    suite still passes and a guard body quietly stops running.
+        names = re.findall(r"^    def (test_\w+)", test_src, re.M)
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        self.assertEqual([], duplicates, f"duplicate test definitions: {duplicates}")
+
+        # 1. Every path a function returns as data must be canonicalised *at the
+        #    point it is produced*. Checking only that ".resolve()" appears
+        #    somewhere in the body is not enough: load_session_manifest
+        #    resolves its search base, so deleting the resolve() on the returned
+        #    value leaves the substring present and the guard silent.
+        def _body(fn: str) -> str:
+            start = router_src.index(f"def {fn}(")
+            return router_src[start : router_src.find("\ndef ", start + 10)]
+
+        manifest_body = _body("load_session_manifest")
+        explicit_block = manifest_body[: manifest_body.index("base = (start")]
+        self.assertIn(
+            ".resolve()", explicit_block,
+            "the explicit-path branch of load_session_manifest returns _path as data "
+            "and must resolve() it; resolving only the search branch leaves the two "
+            "branches reporting the same file under different spellings",
+        )
+        for fn in ("load_session_manifest", "find_installations"):
+            self.assertIn(".resolve()", _body(fn), f"{fn} returns paths as data")
+
+        # 2. A test comparing two paths must not resolve *inside* the assertion:
+        #    resolving both sides normalises away the difference it exists to
+        #    catch. This exact mistake hid the defect in the first draft of the
+        #    test for the fix above.
+        #    Matching is line-based on purpose: a character-class regex stops at
+        #    the first ')' and so never sees the second operand of a comparison
+        #    written as `Path(x["k"]).resolve()`.
+        offenders = []
+        for block in re.findall(r"self\.assert\w+\((.*?)\n(?=\s*(?:self\.|\w|#|\))|$)", test_src, re.S):
+            if block.count(".resolve()") >= 2 and "assertIn" not in block and "assertNotIn" not in block:
+                offenders.append(block.strip()[:120])
+        self.assertEqual(
+            [], offenders,
+            "these assertions resolve both sides, which hides the difference they "
+            f"are meant to detect:\n{offenders}",
+        )
+
     def test_active_measurement_needs_no_host(self):
         """The point of `estimate`: measurement must not wait for a host.
 
@@ -1194,22 +1305,6 @@ class RouterTests(unittest.TestCase):
                     (path.parent / target).resolve().exists(),
                     f"{readme} links to a missing path: {target}",
                 )
-
-    def test_skill_md_sections_are_not_nested_by_accident(self):
-        source = (ROOT / "tests" / "test_router.py").read_text(encoding="utf-8")
-        # Find assertions that pair a replace() with a separator swap.
-        separator_tests = re.findall(
-            r'def (test_[a-z_]*separator[a-z_]*)\(', source
-        )
-        for name in separator_tests:
-            start = source.index(f"def {name}(")
-            body = source[start : source.find("\n    def ", start + 10)]
-            if "os.name" not in body:
-                self.fail(f"{name} manipulates path separators but never checks os.name")
-        self.assertIn(
-            "test_paths_are_handled_with_both_separators", separator_tests,
-            "the separator test should exist and be discoverable by this guard",
-        )
 
     def test_skill_md_sections_are_not_nested_by_accident(self):
         """A demoted '##' silently buries routing rules under an unrelated topic.

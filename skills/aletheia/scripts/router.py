@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.11.1"
+VERSION = "1.11.2"
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 WORD_RE = re.compile(r"[a-z][a-z0-9+-]{1,}|[\u3400-\u9fff]{2,}", re.I)
 # Shared defaults. The CLI and the offline `eval` command must agree, otherwise
@@ -395,6 +395,14 @@ def load_session_manifest(explicit: Path | None, start: Path | None = None) -> d
         path = explicit.expanduser()
         if not path.is_file():
             raise SkillError(f"session manifest not found: {path}")
+        # Canonicalise, because the search branch below already produces a
+        # resolved path and `_path` must not depend on which route found the
+        # file. The same file legitimately has several spellings: on macOS
+        # /var/folders is a symlink to /private/var/folders, and on Windows a
+        # short path (RUNNER~1) and a long path (runneradmin) name one
+        # directory. A caller comparing `_path` against the path it passed in
+        # would otherwise fail on those platforms only.
+        path = path.resolve()
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
@@ -2786,7 +2794,12 @@ def find_installations(name: str = "aletheia") -> dict[str, list[str]]:
     found: dict[str, list[str]] = {}
     for host, spec in TELEMETRY_HOSTS.items():
         for raw in spec.get("skills", ()):
-            root = Path(raw).expanduser()
+            # resolve() because these paths are returned as data, and the caller
+            # may compare them. See load_session_manifest for why a reported path
+            # has to be canonical: on macOS /var is a symlink to /private/var,
+            # and on Windows a short path expands to the long name, so one
+            # directory has several spellings and only one of them is stable.
+            root = Path(raw).expanduser().resolve()
             if not root.is_dir():
                 continue
             candidate = root / name

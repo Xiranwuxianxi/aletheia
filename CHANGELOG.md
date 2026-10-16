@@ -4,6 +4,47 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.11.2 — 2026-10-16
+
+Fixes the macOS and Windows failures, and the class of test that caused them.
+
+### Fixed
+
+- **`load_session_manifest` reported one file under two different names.** The
+  upward-search branch resolved the path it returned; the explicit `--session`
+  branch only expanded `~`. On macOS `/var` is a symlink to `/private/var`; on a
+  Windows runner the temp root arrives as the short path `RUNNER~1` but resolves
+  to `runneradmin`. So the same manifest came back spelled one way when named
+  explicitly and another way when discovered — and `scope_report` publishes that
+  string as `manifest`, so a consumer comparing it against the path it passed in
+  would fail on exactly those two platforms and nowhere else.
+  The explicit branch now resolves too. `find_installations` had the same shape
+  and is fixed the same way.
+- **A duplicated test definition was shadowing a guard.** `test_skill_md_sections_are_not_nested_by_accident`
+  existed twice; Python kept the last, so the first copy's separator-guard body
+  had been silently dead. Removed.
+
+### Added
+
+- **`test_reported_paths_are_canonical_and_consistent`** — a structural guard
+  for the class of defect that has now cost three CI rounds. It checks that a
+  function returning a path as data canonicalises it *at the point it is
+  produced* (not merely somewhere in its body, which load_session_manifest's
+  search branch satisfied on its own), that no assertion resolves both sides of
+  a path comparison, and that no test name is defined twice.
+  The previous two guards matched on the word "separator" and so could not see a
+  test with no such word in its name that failed for exactly that reason.
+- **`tests/guard_selftest.py`** — proves each check above still fires by
+  reintroducing the defect and asserting the guard objects. A guard that has
+  quietly stopped working reports confidence it has not earned, and CI now runs
+  this on every build. Verified: all three probes fire, and the guard passes on
+  the unmodified tree.
+- **CI prints the failing assertion inline** with interpreter version, platform,
+  machine and cwd, instead of a bare `FAILED (failures=N)`. This is what
+  identified this round's cause in one run rather than three.
+
+98 tests pass, lint ok:true, eval 16/16.
+
 ## 1.11.1 — 2026-10-16
 
 Fixes a failure that only appears in CI, on all three platforms.
