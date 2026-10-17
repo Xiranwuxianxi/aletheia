@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
-[![Version](https://img.shields.io/badge/version-1.11.2-888780?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.12.0-888780?style=flat-square)](CHANGELOG.md)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -58,24 +58,58 @@ Plus the two that make long sessions painful: **drifting context** and
 git clone https://github.com/Xiranwuxianxi/aletheia.git
 cd aletheia
 
-# Install into a target project and enable the always-on routing hook
-python scripts/install.py --platform both --scope project --project /path/to/my-project --bootstrap
-
-# Or into your personal directory
-python scripts/install.py --platform both --scope user --bootstrap
+python scripts/install.py --list          # the 14 hosts and where each reads instructions
+python scripts/install.py --scope user --bootstrap --dry-run
+python scripts/install.py --scope user --bootstrap
 ```
 
 | Flag | Meaning |
 | --- | --- |
-| `--platform` | `codex` / `claude` / `both` |
-| `--scope` | `project` (in-repo) or `user` (personal) |
-| `--dry-run` | Preview every write before it happens |
-| `--force` | Back up a differing install before replacing it |
-| `--bootstrap` | Add/update the marked routing block in `AGENTS.md` / `CLAUDE.md` — only when you pass it |
+| `--host` | a host key or label, repeatable; default is every host installed on this machine |
+| `--scope` | `project` (beside the code) or `user` (every project) |
+| `--list` | print every known host with its skill directory and instruction file |
+| `--dry-run` | preview every write before it happens |
+| `--force` | back up a differing install before replacing it |
+| `--bootstrap` | write the marked routing block into each host's own instruction file |
 
-The installer refuses to overwrite conflicting files by default. `--bootstrap`
-only edits its own marked block; your existing rules are preserved. Try
-`--dry-run` first.
+```bash
+# just one host
+python scripts/install.py --host kimi --scope user --bootstrap
+
+# beside a codebase instead of globally
+python scripts/install.py --host codex --scope project --project /path/to/my-project --bootstrap
+
+# pick skills by number instead of letting it choose
+python scripts/install.py --scope user --bootstrap --mode manual
+```
+
+**Every host in the registry is installable.** The previous installer knew two
+while the registry tracked fourteen, so the hosts actually in use had no path at
+all.
+
+Three hosts get the skill directory but no routing hook, because no instruction
+file for them could be verified and a guessed filename would be worse than none:
+
+| Host | Why |
+| --- | --- |
+| **WorkBuddy** | its instruction surface is `SOUL.md`, which is your identity file — never written |
+| **OpenClaw** | reads `AGENTS.md` from its own workspace; the path was not confirmed |
+| **Aider** | its `read:` list is a config setting, not a conventional file |
+
+The installer says which host it skipped and why, per host, in its output.
+
+### What it refuses to do
+
+- **Overwrite a different install** without `--force`, and back it up rather than
+  deleting it.
+- **Write through a symlink**, at the target or at the instruction file.
+- **Touch `SOUL.md`, `USER.md`, `IDENTITY.md` or `MEMORY.md`.** Those describe the
+  user; a routing hook does not belong there and the damage is not recoverable.
+- **Guess.** A host with no verified instruction file gets the skill and a stated
+  reason, not an invented filename.
+
+Re-running is idempotent: the hook lives between markers and is upserted, never
+appended twice. Try `--dry-run` first.
 
 <details>
 <summary><b>Route B — install just the skill</b></summary>
@@ -91,7 +125,7 @@ Copy `skills/aletheia/` into wherever your agent looks for skills:
 | OpenClaw | — | `~/.openclaw/skills/aletheia/` |
 | Kimi Code | — | `~/.kimi/skills/aletheia/` |
 | Qwen Code | — | `~/.qwen/skills/aletheia/` |
-| Gemini CLI | — | `~/.gemini/extensions/aletheia/` |
+| Gemini CLI | — | `~/.gemini/skills/aletheia/` |
 | GitHub Copilot CLI | — | `~/.copilot/skills/aletheia/` |
 
 Then add one line to your project instructions:
@@ -194,10 +228,10 @@ Pick the mode **once**, at install:
 
 ```bash
 # Autonomous (default): Aletheia decides, and shows what it rejected and why
-python scripts/install.py --platform both --scope project --bootstrap --mode auto
+python scripts/install.py --scope user --bootstrap --mode auto
 
 # Owner-driven: Aletheia offers numbered candidates and waits for you
-python scripts/install.py --platform both --scope project --bootstrap --mode manual
+python scripts/install.py --scope user --bootstrap --mode manual
 ```
 
 Either way the five-stage disclosure still applies — manual mode changes *who
@@ -284,15 +318,16 @@ python skills/aletheia/scripts/router.py report --out report.html
 Fourteen mainstream hosts are registered. **Every host returns the same keys**,
 and one we cannot read is reported `unavailable` — never `0`.
 
-| Host | Telemetry | Skill dir | Host | Telemetry | Skill dir |
+| Host | Telemetry | Skill dir (project) | Host | Telemetry | Skill dir (project) |
 | --- | --- | --- | --- | --- | --- |
 | Claude Code | measured | `.claude/skills` | **OpenClaw** | SQLite | `.openclaw/skills` |
 | Codex | measured | `.agents/skills` | **Hermes Agent** | SQLite | `.hermes/skills` |
 | Kimi Code | measured | `.kimi/skills` | OpenCode | JSON store | `.opencode/skills` |
 | Qwen Code | measured | `.qwen/skills` | Factory Droid | measured | `.factory/skills` |
-| Gemini CLI | measured | `.gemini/extensions` | Kiro | measured | `.kiro/skills` |
+| Gemini CLI | measured | `.gemini/skills` | Kiro | measured | `.kiro/skills` |
 | GitHub Copilot CLI | measured | `.copilot/skills` | Crush | measured | `.crush/skills` |
 | Aider | if enabled | `.aider/skills` | WorkBuddy | none persisted | `.workbuddy/skills` |
+| OpenCode | JSON store | `.opencode/skills` | Crush | measured | `.crush/skills` |
 
 Each host names its fields differently — Claude logs `cache_read_input_tokens`,
 Codex hides `cached_tokens` inside `input_token_details`, Kimi uses
@@ -341,12 +376,18 @@ each of the supported hosts puts them, so a skill installed under *any* of them
 stays reachable:
 
 ```text
-~/.workbuddy/skills        ~/.hermes/skills        ~/.openclaw/skills
-~/.claude/skills           ~/.agents/skills         ~/.copilot/skills
-~/.kimi/skills             ~/.qwen/skills           ~/.gemini/extensions
-~/.factory/skills          ~/.kiro/skills           ~/.crush/skills
-~/.aider/skills            ~/.config/opencode/skill
+~/.workbuddy/skills            ~/.hermes/skills            ~/.openclaw/skills
+~/.workbuddy/plugins/cache     ~/.claude/skills            ~/.agents/skills
+~/.copilot/skills              ~/.kimi/skills              ~/.qwen/skills
+~/.gemini/skills               ~/.factory/skills           ~/.kiro/skills
+~/.aider/skills                ~/.local/share/crush/skills
+~/.opencode/skills             ~/.config/opencode/skills
 ```
+
+Crush reads two different paths depending on scope: `~/.local/share/crush/skills`
+at user level, `.crush/skills` inside a project. Both are listed above and in the
+host table, because installing to the wrong one leaves Crush unable to see the
+skill at all.
 
 This matters more than it sounds. A library mirrored across agents accumulates
 duplicates and drifts, and the audit says so rather than hiding it:

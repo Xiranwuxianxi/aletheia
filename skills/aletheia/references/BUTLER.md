@@ -59,8 +59,11 @@ skill you are publishing.
 The owner decides the operating mode **once**, at install:
 
 ```bash
-python scripts/install.py --platform both --scope project --bootstrap --mode auto    # default
-python scripts/install.py --platform both --scope project --bootstrap --mode manual
+python scripts/install.py --scope user --bootstrap --mode auto     # default
+python scripts/install.py --scope user --bootstrap --mode manual
+
+python scripts/install.py --list                    # every host and its instruction file
+python scripts/install.py --host kimi --scope user  # just one host
 ```
 
 | Mode | Behaviour |

@@ -4,7 +4,7 @@ import os
 import re
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills/aletheia/scripts/router.py"
@@ -775,6 +775,44 @@ class RouterTests(unittest.TestCase):
         """
         router_src = (ROOT / "skills/aletheia/scripts/router.py").read_text(encoding="utf-8")
         test_src = (ROOT / "tests" / "test_router.py").read_text(encoding="utf-8")
+
+        # 0a. Every personal-level skill directory the registry declares must be
+        #     documented, and any host-shaped directory the docs name must be one
+        #     the registry declares. Gemini was documented as
+        #     ~/.gemini/extensions in five places across two languages while the
+        #     host reads ~/.gemini/skills — a reader following the docs looked in
+        #     a directory that does not exist.
+        for readme in ("README.md", "README.zh-CN.md"):
+            text = (ROOT / readme).read_text(encoding="utf-8")
+            personal = set()
+            for host in router.TELEMETRY_HOSTS.values():
+                personal |= {s for s in host.get("skills", ()) if s.startswith("~/")}
+            for directory in sorted(personal):
+                self.assertIn(
+                    directory, text,
+                    f"{readme} never mentions {directory}, a directory hosts read",
+                )
+
+            # Anything shaped like ~/.x/skills must be a skill directory some
+            # host declares, or it sends a reader where no host looks. Keyed on
+            # the leaf being a skill-directory name, because the docs also name
+            # paths that are not skill directories (~/.aletheia/ledger.jsonl,
+            # ~/.workbuddy/workspace/sessions) and those are none of this guard's
+            # business.
+            declared = set(personal)
+            declared |= {"~/" + h["native_skill_dir"]
+                         for h in router.TELEMETRY_HOSTS.values()
+                         if h.get("native_skill_dir")}
+            skill_dirs = {PurePosixPath(d).name for d in declared}
+            for found in sorted(set(re.findall(r"~/\.[A-Za-z][\w.-]*/[\w.-]+", text))):
+                parts = found.split("/")
+                leaf = PurePosixPath(parts[-1]).name
+                # Only assert where the last segment names a skill directory, so
+                # an unrelated ~/.host/anything path does not trip this.
+                if leaf in skill_dirs and found not in declared:
+                    self.fail(
+                        f"{readme} names {found}, which no host in the registry declares"
+                    )
 
         # 0. A silently duplicated test is dead code that also silently orphans
         #    whatever it was shadowing. Python keeps the last definition, so the

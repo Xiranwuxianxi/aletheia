@@ -4,6 +4,83 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.12.0 — 2026-10-17
+
+Makes the skill installable into every host it knows about, and fixes three
+registry errors that made whole hosts invisible.
+
+### The installer knew two hosts; the registry tracked fourteen
+
+`scripts/install.py` accepted only `--platform codex|claude`. Kimi, Gemini,
+Copilot, Hermes, OpenClaw and Qwen — the ones actually in use — had no install
+path at all. It now derives target directories from the same registry the router
+uses, so the two cannot disagree about where a host reads skills.
+
+  python scripts/install.py --list                          # hosts, dirs, instruction files
+  python scripts/install.py --scope user --bootstrap        # every installed host
+  python scripts/install.py --host kimi --scope user        # one host
+  python scripts/install.py --scope project --project DIR --bootstrap
+
+Instruction files were sourced from each project's own documentation, then
+checked against what is present on a machine where those hosts run. Where the
+two disagreed the machine won: Kimi's data root is `.kimi-code` even though its
+skills directory here is `.kimi`.
+
+**Three hosts get the skill but no routing hook**, each for a stated reason —
+WorkBuddy because its instruction surface is `SOUL.md`, which is a user's
+identity file; OpenClaw because its workspace-relative `AGENTS.md` path could not
+be confirmed; Aider because its `read:` list is a config setting rather than a
+conventional file. A guessed filename would be worse than none, so the installer
+says which host it skipped and why.
+
+### Fixed
+
+- **Gemini's 12 skills were invisible.** The registry pointed at
+  `~/.gemini/extensions`, which does not exist; the host reads
+  `~/.gemini/skills`. Found by auditing the registry against the machine rather
+  than against documentation, and fixed in five places across both languages.
+- **`~/.config/opencode/skill` was singular** while every other host used
+  `skills`. OpenCode is not installed on the machine this was written on, so its
+  directory could not be verified — noted in the registry rather than presented
+  as fact.
+- **`find_installations` reported 23 paths for 14 installations.** `~/.agents/skills`
+  is claimed by six hosts and each reported it separately, which reads as
+  duplication that is not there.
+- **The installer's user scope wrote to the developer's real home.** A unit test
+  created `~/.hermes.md` as a side effect. `--home` now redirects every
+  home-relative path, and a test asserts a run under `--home` leaves the real one
+  byte-identical.
+
+### Refusals, unchanged in spirit and now explicit
+
+`SOUL.md`, `USER.md`, `IDENTITY.md` and `MEMORY.md` are never written, whatever
+a host claims to read. Those describe the user; a routing hook does not belong
+there and the damage is not recoverable. Symlinked targets and instruction files
+are refused. A differing install is backed up, never overwritten without
+`--force`.
+
+### Shared directories are claimed deliberately
+
+`~/.agents/skills` is listed by six hosts. Alphabetical order hands it to Aider,
+which reads no standard instruction file — so Codex, Gemini, Qwen and the rest
+would have received the directory and silently lost their hook. Hosts that can
+receive a hook now claim shared directories first.
+
+### Guards, each verified to fire
+
+- Every personal-level directory the registry declares must appear in both
+  READMEs, and any `~/.x/skills` the docs name must be one the registry
+  declares. This caught the Gemini error, and then three directories that were
+  never documented at all (`~/.opencode/skills`, `~/.local/share/crush/skills`,
+  `~/.workbuddy/plugins/cache`) — plus that Crush reads a *different* path per
+  scope, which installing to the wrong one would have hidden completely.
+- No duplicate test definitions, no assertion that resolves both sides of a path
+  comparison, no untagged current version — `tests/guard_selftest.py` proves
+  each still fires.
+
+104 tests pass, lint ok:true, eval 16/16. Installed and verified on this machine:
+14 skill directories, 10 routing hooks, zero identity files touched.
+
 ## 1.11.2 — 2026-10-16
 
 Fixes the macOS and Windows failures, and the class of test that caused them.

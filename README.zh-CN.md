@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-534AB7?style=flat-square)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-1D9E75?style=flat-square)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/spec-Agent%20Skills-BA7517?style=flat-square)](https://agentskills.io/specification)
-[![Version](https://img.shields.io/badge/version-1.11.2-888780?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.12.0-888780?style=flat-square)](CHANGELOG.md)
 
 [English](README.md) · **简体中文**
 
@@ -50,15 +50,16 @@ git clone https://github.com/Xiranwuxianxi/aletheia.git
 cd aletheia
 
 # 安装到目标项目，并显式启用常驻路由入口
-python scripts/install.py --platform both --scope project --project /path/to/my-project --bootstrap
+python scripts/install.py --scope project --project /path/to/my-project --bootstrap
 
 # 仅安装到个人目录
-python scripts/install.py --platform both --scope user --bootstrap
+python scripts/install.py --scope user --bootstrap
 ```
 
 | 参数 | 含义 |
 | --- | --- |
-| `--platform` | `codex` / `claude` / `both` |
+| `--host` | 宿主标识或名称，可重复；默认安装到本机所有已装宿主 |
+| `--list` | 列出全部宿主及其 skill 目录与指令文件 |
 | `--scope` | `project`（项目内）或 `user`（个人目录） |
 | `--dry-run` | 先预览所有将发生的写入 |
 | `--force` | 先备份旧版本再替换 |
@@ -80,7 +81,7 @@ python scripts/install.py --platform both --scope user --bootstrap
 | OpenClaw | — | `~/.openclaw/skills/aletheia/` |
 | Kimi Code | — | `~/.kimi/skills/aletheia/` |
 | Qwen Code | — | `~/.qwen/skills/aletheia/` |
-| Gemini CLI | — | `~/.gemini/extensions/aletheia/` |
+| Gemini CLI | — | `~/.gemini/skills/aletheia/` |
 | GitHub Copilot CLI | — | `~/.copilot/skills/aletheia/` |
 
 然后给项目指令加一句：
@@ -173,10 +174,10 @@ python tests/zero_dependency_check.py
 
 ```bash
 # 自主（默认）：Aletheia 决定，并展示它否决了什么、为什么
-python scripts/install.py --platform both --scope project --bootstrap --mode auto
+python scripts/install.py --scope user --bootstrap --mode auto
 
 # 主人驱动：Aletheia 列出带序号的候选，等你回答
-python scripts/install.py --platform both --scope project --bootstrap --mode manual
+python scripts/install.py --scope user --bootstrap --mode manual
 ```
 
 无论哪种模式，五阶段披露照旧 —— 手动模式改变的是**谁做决定**，不是**什么必须可见**。
@@ -265,9 +266,10 @@ python skills/aletheia/scripts/router.py report --out report.html
 | Codex | 实测 | `.agents/skills` | **Hermes Agent** | SQLite | `.hermes/skills` |
 | Kimi Code | 实测 | `.kimi/skills` | OpenCode | JSON 存储 | `.opencode/skills` |
 | Qwen Code | 实测 | `.qwen/skills` | Factory Droid | 实测 | `.factory/skills` |
-| Gemini CLI | 实测 | `.gemini/extensions` | Kiro | 实测 | `.kiro/skills` |
+| Gemini CLI | 实测 | `.gemini/skills` | Kiro | 实测 | `.kiro/skills` |
 | GitHub Copilot CLI | 实测 | `.copilot/skills` | Crush | 实测 | `.crush/skills` |
 | Aider | 需开启 | `.aider/skills` | WorkBuddy | 未持久化 | `.workbuddy/skills` |
+| OpenCode | JSON 存储 | `.opencode/skills` | Crush | 实测 | `.crush/skills` |
 
 **每家的字段名都不一样**——Claude 是 `cache_read_input_tokens`，Codex 把
 `cached_tokens` 藏在 `input_token_details`，Kimi 是 `message.payload.token_usage`
@@ -305,12 +307,16 @@ cache read 单独统计而不并入总计——它便宜得多，混在一起成
 **装在任何 agent 下的 skill 都仍然可达**：
 
 ```text
-~/.workbuddy/skills        ~/.hermes/skills        ~/.openclaw/skills
-~/.claude/skills           ~/.agents/skills         ~/.copilot/skills
-~/.kimi/skills             ~/.qwen/skills           ~/.gemini/extensions
-~/.factory/skills          ~/.kiro/skills           ~/.crush/skills
-~/.aider/skills            ~/.config/opencode/skill
+~/.workbuddy/skills            ~/.hermes/skills            ~/.openclaw/skills
+~/.workbuddy/plugins/cache     ~/.claude/skills            ~/.agents/skills
+~/.copilot/skills              ~/.kimi/skills              ~/.qwen/skills
+~/.gemini/skills               ~/.factory/skills           ~/.kiro/skills
+~/.aider/skills                ~/.local/share/crush/skills
+~/.opencode/skills             ~/.config/opencode/skills
 ```
+
+**Crush 在不同 scope 下读的是两个不同路径**：个人级是 `~/.local/share/crush/skills`，
+项目级是 `.crush/skills`。两个都列在上面和宿主表里——**装错那个，Crush 就完全看不到这个 skill**。
 
 这比听起来更重要。**库在多个 agent 间镜像，必然产生重复和漂移**——而审计会直接告诉你，
 不会藏着：

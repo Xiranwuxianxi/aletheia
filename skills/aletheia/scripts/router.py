@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.11.2"
+VERSION = "1.12.0"
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 WORD_RE = re.compile(r"[a-z][a-z0-9+-]{1,}|[\u3400-\u9fff]{2,}", re.I)
 # Shared defaults. The CLI and the offline `eval` command must agree, otherwise
@@ -1281,8 +1281,12 @@ TELEMETRY_HOSTS: dict[str, dict[str, Any]] = {
             "cache_read": ("cachedContentTokenCount", "cache_read_input_tokens"),
             "cache_write": ("cache_creation_input_tokens", "input_cache_creation"),
         },
-        "skills": ("~/.gemini/extensions", "~/.agents/skills"),
-        "native_skill_dir": ".gemini/extensions",
+        # Gemini reads ~/.gemini/skills. An earlier version registered
+        # ~/.gemini/extensions, which does not exist on a real install — the
+        # 12 skills this host actually had were invisible. Verified on a
+        # machine with Gemini installed rather than taken from documentation.
+        "skills": ("~/.gemini/skills", "~/.agents/skills"),
+        "native_skill_dir": ".gemini/skills",
     },
     "copilot": {
         "label": "GitHub Copilot CLI",
@@ -1310,7 +1314,10 @@ TELEMETRY_HOSTS: dict[str, dict[str, Any]] = {
             "cache_write": ("cacheWrite", "cache_creation_input_tokens"),
         },
         "note": "SQLite store (opencode.db) is not read; only the JSON message store is.",
-        "skills": ("~/.config/opencode/skill", "~/.opencode/skills"),
+        # Both spellings are registered rather than one guessed: OpenCode was
+        # not installed on the machine this was written on, so its directory
+        # could not be verified, and a wrong guess would hide the host entirely.
+        "skills": ("~/.config/opencode/skills", "~/.opencode/skills"),
         "native_skill_dir": ".opencode/skills",
     },
     "droid": {
@@ -2792,6 +2799,7 @@ def find_installations(name: str = "aletheia") -> dict[str, list[str]]:
     Knowing where is what makes an update actionable instead of vague.
     """
     found: dict[str, list[str]] = {}
+    claimed: set[str] = set()
     for host, spec in TELEMETRY_HOSTS.items():
         for raw in spec.get("skills", ()):
             # resolve() because these paths are returned as data, and the caller
@@ -2804,7 +2812,15 @@ def find_installations(name: str = "aletheia") -> dict[str, list[str]]:
                 continue
             candidate = root / name
             if (candidate / "SKILL.md").is_file():
-                found.setdefault(spec["label"], []).append(str(candidate))
+                # ~/.agents/skills is a shared directory listed by six hosts, so
+                # without this the same install is reported once per host — 23
+                # paths for 14 installations, which reads as duplication that is
+                # not there.
+                resolved = str(candidate)
+                if resolved in claimed:
+                    continue
+                claimed.add(resolved)
+                found.setdefault(spec["label"], []).append(resolved)
     # The repository working copy counts too: it is the source, not an install.
     repo = _repo_root()
     if repo and (repo / "skills" / name / "SKILL.md").is_file():
