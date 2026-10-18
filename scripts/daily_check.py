@@ -98,7 +98,10 @@ def build_summary(audit: dict, telemetry: dict, active: dict | None = None,
 
     lines.append("")
     if readable:
-        lines.append(f"Token usage read from {', '.join(hosts[h]['label'] for h in readable)}: {total:,} billable (excl. cache reads)")
+        lines.append(
+            f"Token usage read from {', '.join(hosts[h]['label'] for h in readable)}: "
+            f"{total:,} billable tokens (input + output + cache write; cache read excluded)"
+        )
     missing = [v["label"] for v in hosts.values() if not v.get("available")]
     if missing:
         lines.append(f"No token telemetry: {', '.join(missing)} — read from that host's own UI.")

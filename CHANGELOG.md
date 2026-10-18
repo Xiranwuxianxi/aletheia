@@ -4,6 +4,48 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.13.1 — 2026-10-18
+
+Every number now says what it counts, and every human-facing view is laid out
+for reading — with columns that stay straight even in Chinese.
+
+### The unit is tokens, said out loud
+
+A bare "billable" label hides what is being counted. Every surface — the HTML,
+markdown and text reports, the telemetry view, and the daily digest — now
+prints **billable tokens**, and defines the sum where the number appears:
+input + output + cache write. Cache reads stay in their own column and are
+never folded into that total, because they bill at a fraction of fresh input.
+The report's legend gains explicit `unit` and `billable` rows, and the per-host
+table gains a `Billable tokens` column with a measured-host total underneath.
+
+### Plain text that is actually typeset
+
+The report's text tier used to build Markdown tables and then strip the
+Markdown, which left ragged two-space columns. It now renders real tables
+through CJK-aware layout helpers (`display_width`, `pad_cells`, `clip_cells`,
+`render_text_table`): an East-Asian glyph counts as two terminal cells, so
+rows line up whether the content is `33,891` or `名称`. Column alignment is
+taken from the Markdown spec row (`---:` stays right-aligned) instead of being
+guessed.
+
+### Four commands grow a human format
+
+`inventory`, `route`, `hosts` and `telemetry` accept `--format text` beside the
+JSON contract (JSON stays the default). `inventory` becomes a numbered picker
+with clipped descriptions and the "reply with a number" instruction;
+`route` shows score bars per candidate with the signals that matched; `hosts`
+prints one capability table (measured vs no token telemetry, per host);
+`telemetry` prints the usage table plus the billable total and a per-host
+reason for every `unavailable`. `route --ascii` swaps the bar glyphs for
+terminals without box drawing.
+
+### A headline can no longer claim an estimate it does not have
+
+When no scenario comparison has been recorded, the headline rows now read
+`unavailable / no recorded comparison yet` instead of pairing an em-dash value
+with the basis "estimated" — the combination this project exists to prevent.
+
 ## 1.13.0 — 2026-10-18
 
 Three new mainstream hosts, per-OS skill paths, and a hook that makes the

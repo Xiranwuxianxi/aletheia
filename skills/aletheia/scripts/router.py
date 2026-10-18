@@ -12,11 +12,12 @@ import os
 import re
 import sys
 import time
+import unicodedata
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.13.0"
+VERSION = "1.13.1"
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 WORD_RE = re.compile(r"[a-z][a-z0-9+-]{1,}|[\u3400-\u9fff]{2,}", re.I)
 # Shared defaults. The CLI and the offline `eval` command must agree, otherwise
@@ -1097,14 +1098,19 @@ def render_report_html(records: list[dict[str, Any]]) -> str:
                 value = _info.get(key)
                 return f"{value:,}" if isinstance(value, int) else _esc(value)
 
+            billable = _billable_tokens(info)
+            billable_cell = f"{billable:,}" if isinstance(billable, int) else "unavailable"
             host_cards += (
                 '<div class="card measured-card">'
                 f'<h3>{label} <span class="ok">measured</span></h3>'
-                f'<p class="big">{num("total_tokens_including_cache_read")}</p>'
+                f'<p class="big">{billable_cell} <span class="est">billable tokens</span></p>'
                 f'<p class="why">input {num("input_tokens")} · output {num("output_tokens")}'
-                f' · cache read {num("cache_read_tokens")}'
-                f' · cache write {num("cache_write_tokens")}'
-                f' · {_esc(info.get("messages_with_usage"))} messages across'
+                f' · cache write {num("cache_write_tokens")} — that sum is the billable count'
+                f' (input + output + cache write)</p>'
+                f'<p class="why">cache read {num("cache_read_tokens")} · total incl. cache read'
+                f' {num("total_tokens_including_cache_read")} · cache reads are reported apart'
+                f' and never blended into the billable total</p>'
+                f'<p class="why">{_esc(info.get("messages_with_usage"))} messages across'
                 f' {_esc(info.get("sessions_scanned"))} session file(s)</p>'
                 "</div>"
             )
@@ -2477,6 +2483,102 @@ def render_audit_text(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+# --- Plain-text layout -------------------------------------------------------
+# The text tier is delivered into terminals and chat bubbles where Markdown
+# does not render. Columns therefore have to be aligned in *display cells*, not
+# in code points: a CJK ideograph occupies two terminal cells, and padding by
+# len() visibly skews every row that contains one. unicodedata is stdlib, so
+# doing this properly costs nothing.
+
+
+def display_width(text: str) -> int:
+    """Terminal cells a string occupies (wide East-Asian glyphs count double)."""
+    width = 0
+    for char in str(text):
+        if unicodedata.east_asian_width(char) in ("W", "F"):
+            width += 2
+        else:
+            width += 1
+    return width
+
+
+def pad_cells(text: str, width: int, align: str = "left") -> str:
+    """Pad to `width` display cells. align: 'left', 'right' or 'center'."""
+    text = str(text)
+    gap = max(0, width - display_width(text))
+    if align == "right":
+        return " " * gap + text
+    if align == "center":
+        left = gap // 2
+        return " " * left + text + " " * (gap - left)
+    return text + " " * gap
+
+
+def clip_cells(text: str, width: int) -> str:
+    """Truncate to `width` display cells, marking the cut with an ellipsis."""
+    text = str(text)
+    if display_width(text) <= width:
+        return text
+    out = []
+    used = 0
+    for char in text:
+        char_width = 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+        if used + char_width > width - 1:
+            break
+        out.append(char)
+        used += char_width
+    return "".join(out) + "…"
+
+
+NUMERIC_CELL = re.compile(r"^[()\[\]{}+\-*/=<>~^|\\%,:.\d\s]*\d[()\[\]{}+\-*/=<>~^|\\%,:.\d\s]*$")
+
+
+def _looks_numeric(value: str) -> bool:
+    """A cell that is a number, possibly with thousands separators or a unit.
+
+    Used only to pick column alignment; anything ambiguous counts as text.
+    """
+    return bool(NUMERIC_CELL.match(value.strip()))
+
+
+def render_text_table(
+    headers: list[str],
+    rows: list[list[str]],
+    aligns: list[str] | None = None,
+    gap: str = "  ",
+) -> str:
+    """An aligned plain-text table that stays aligned with CJK content.
+
+    `aligns` gives per-column alignment ('left'/'right'/'center'); when it is
+    omitted, numeric columns default to right and everything else to left.
+    """
+    columns = len(headers)
+    cells = [[("" if value is None else str(value)) for value in row] for row in rows]
+
+    if aligns is None:
+        aligns = []
+        for index in range(columns):
+            values = [row[index] for row in cells if index < len(row) and row[index].strip()]
+            aligns.append("right" if values and all(_looks_numeric(v) for v in values) else "left")
+    aligns = list(aligns) + ["left"] * (columns - len(aligns))
+
+    widths = [display_width(header) for header in headers]
+    for row in cells:
+        for index in range(min(columns, len(row))):
+            widths[index] = max(widths[index], display_width(row[index]))
+
+    def line(values: list[str]) -> str:
+        padded = [
+            pad_cells(values[i] if i < len(values) else "", widths[i], aligns[i])
+            for i in range(columns)
+        ]
+        return gap.join(padded).rstrip()
+
+    out = [line(headers), gap.join("-" * w for w in widths)]
+    out.extend(line(row) for row in cells)
+    return "\n".join(out)
+
+
 def _latest_comparison(records: list[dict[str, Any]]) -> dict[str, Any]:
     """Newest record that actually carries a scenario comparison.
 
@@ -2488,6 +2590,234 @@ def _latest_comparison(records: list[dict[str, Any]]) -> dict[str, Any]:
         if comparison and "saved_tokens_est" in comparison:
             return comparison
     return {}
+
+
+def _billable_tokens(info: dict[str, Any]) -> int | None:
+    """Billable tokens for a telemetry record: input + output + cache write.
+
+    Older ledger records predate the explicit field, so fall back to summing
+    the three buckets. Returns None when any part is not a real measurement —
+    a missing number must never become a zero.
+    """
+    value = info.get("billable_tokens_excluding_cache_read")
+    if isinstance(value, int):
+        return value
+    parts = [info.get(key) for key in ("input_tokens", "output_tokens", "cache_write_tokens")]
+    if all(isinstance(part, int) for part in parts):
+        return sum(parts)
+    return None
+
+
+def _strip_inline_md(cell: str) -> str:
+    """Remove bold / inline-code / italic markers from one cell of text."""
+    cell = re.sub(r"\*\*(.+?)\*\*", r"\1", cell)
+    cell = re.sub(r"`(.+?)`", r"\1", cell)
+    cell = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", cell)
+    return cell.strip()
+
+
+def _plain_text_table(block: list[str]) -> list[str]:
+    """Render one Markdown table block as an aligned plain-text table.
+
+    The Markdown separator row (--- / :---:) carries the column alignment, so
+    it is honoured instead of guessed. This is what keeps the text tier a
+    formatted document rather than a ragged dump of pipe-stripped cells.
+    """
+    rows: list[list[str]] = []
+    aligns: list[str] | None = None
+    for line in block:
+        raw_cells = line.strip().strip("|").split("|")
+        stripped = [c.strip() for c in raw_cells]
+        if stripped and all(re.fullmatch(r":?-{2,}:?", c) for c in stripped if c):
+            aligns = [
+                "center" if c.startswith(":") and c.endswith(":") else "right" if c.endswith(":") else "left"
+                for c in stripped
+            ]
+            continue
+        rows.append([_strip_inline_md(c) for c in raw_cells])
+    if not rows:
+        return []
+    return render_text_table(rows[0], rows[1:], aligns).splitlines()
+
+
+def _plain_text(md_lines: list[str]) -> str:
+    """Convert the Markdown body into plain text a terminal can show as-is.
+
+    Headings become rule-underlined lines, tables become real aligned tables,
+    and every Markdown decoration is stripped — but the column structure is
+    rebuilt, never flattened.
+    """
+    out: list[str] = []
+    index = 0
+    while index < len(md_lines):
+        line = md_lines[index]
+        if line.startswith("|"):
+            block = []
+            while index < len(md_lines) and md_lines[index].startswith("|"):
+                block.append(md_lines[index])
+                index += 1
+            out.extend(_plain_text_table(block))
+            continue
+        line = re.sub(r"^#+\s*", lambda m: "=" * len(m.group(0)) + " ", line)
+        line = re.sub(r"^>\s*", "", line)
+        indent = line[: len(line) - len(line.lstrip())]
+        line = indent + _strip_inline_md(line.lstrip())
+        line = re.sub(r"^(\s*)-\s+", r"\1- ", line)
+        out.append(line.rstrip())
+        index += 1
+    return "\n".join(out)
+
+
+# --- Plain-text CLI views ----------------------------------------------------
+# JSON stays the machine contract. These renderers are for the human holding
+# the terminal: same data, aligned columns, numbers the owner can act on.
+
+def render_inventory_text(payload: dict[str, Any]) -> str:
+    """Numbered picker over the inventory, aligned and readable in a terminal."""
+    lines = [
+        "ALETHEIA SKILL INVENTORY",
+        "",
+        f"{payload['unique_skills']} unique skill(s)"
+        f" · {payload['total_installed']} install(s) on disk"
+        f" · {payload['duplicate_installs']} duplicate install(s) collapsed",
+    ]
+    if payload.get("truncated"):
+        lines.append(f"Showing {payload['listed']} of {payload['matched']} match(es); raise --limit or use 0 for all.")
+    lines.append("")
+
+    rows = [
+        [str(entry["n"]), entry["name"], clip_cells(entry["description"], 64), entry["path"]]
+        for entry in payload.get("entries", [])
+    ]
+    if rows:
+        lines.extend(render_text_table(["#", "Skill", "Description", "Path"], rows).splitlines())
+    else:
+        lines.append("(no skill matched)")
+    lines.append("")
+    lines.append(payload.get("how_to_pick", ""))
+
+    warnings = payload.get("warnings", {})
+    errors = payload.get("errors", {})
+    if warnings.get("count") or errors.get("count"):
+        lines.append("")
+        lines.append(f"{errors.get('count', 0)} error(s) · {warnings.get('count', 0)} warning(s) during discovery")
+        for sample in (errors.get("sample") or [])[:3]:
+            lines.append(f"  ! {clip_cells(sample, 100)}")
+        for sample in (warnings.get("sample") or [])[:3]:
+            lines.append(f"  ? {clip_cells(sample, 100)}")
+    return "\n".join(lines)
+
+
+def render_route_text(payload: dict[str, Any], task: str = "", ascii_only: bool = False) -> str:
+    """Ranked candidates with score bars — a picker, not a JSON wall."""
+    glyphs = GLYPHS_ASCII if ascii_only else GLYPHS_UNICODE
+    lines = ["ALETHEIA ROUTE", ""]
+    if task:
+        lines.append(f"Task: {clip_cells(task, 100)}")
+        lines.append("")
+
+    if payload.get("status") == "no_match" or not payload.get("candidates"):
+        lines.append("No candidate cleared the threshold. Use ordinary tools, or lower --threshold.")
+    else:
+        rows = []
+        for index, cand in enumerate(payload["candidates"], start=1):
+            score = cand.get("score", 0)
+            bar = render_bar(min(1.0, score / 100.0), width=16, glyphs=glyphs)
+            rows.append([
+                str(index),
+                f"{score:>3} {bar}",
+                cand["name"],
+                clip_cells(", ".join(cand.get("signals", [])), 44),
+                cand["path"],
+            ])
+        lines.extend(
+            render_text_table(
+                ["#", "Score", "Skill", "Why it matched", "Path"], rows,
+                ["right", "left", "left", "left", "left"],
+            ).splitlines()
+        )
+    lines.append("")
+    lines.append(f"{payload.get('candidate_count', 0)} candidate(s) above threshold.")
+    lines.append("Read the candidate SKILL.md in full (scope, tools, permissions) before invoking it.")
+    if payload.get("next_action"):
+        lines.append(clip_cells(payload["next_action"], 200))
+    return "\n".join(lines)
+
+
+def render_hosts_text(payload: dict[str, Any]) -> str:
+    """What each supported host can and cannot be measured for."""
+    rows = [
+        [
+            host["id"],
+            host["label"],
+            "measured" if host.get("telemetry") else "no token telemetry",
+            host.get("skill_dir") or "—",
+        ]
+        for host in payload.get("supported", [])
+    ]
+    lines = ["ALETHEIA SUPPORTED HOSTS", ""]
+    lines.extend(
+        render_text_table(["Host id", "Label", "Token telemetry", "Skill directory"], rows).splitlines()
+    )
+    lines.append("")
+    roots = payload.get("skill_roots") or []
+    lines.append(f"{len(roots)} skill root(s) exist on this machine.")
+    if payload.get("note"):
+        lines.append(payload["note"])
+    return "\n".join(lines)
+
+
+def render_telemetry_text(usage: dict[str, Any]) -> str:
+    """Per-host token usage as one aligned table with an honest billable total."""
+    rows: list[list[str]] = []
+    billable_total = 0
+    reasons: list[tuple[str, str]] = []
+    for host, info in usage.items():
+        label = info.get("label", host)
+        billable = _billable_tokens(info)
+        if info.get("available"):
+            if isinstance(billable, int):
+                billable_total += billable
+            def n(value: Any) -> str:
+                return f"{value:,}" if isinstance(value, int) else "—"
+            rows.append([
+                label,
+                "measured",
+                n(info.get("input_tokens")),
+                n(info.get("output_tokens")),
+                n(info.get("cache_write_tokens")),
+                n(info.get("cache_read_tokens")),
+                f"{billable:,}" if isinstance(billable, int) else "unavailable",
+                n(info.get("messages_with_usage")),
+            ])
+        else:
+            rows.append([label, "unavailable", "—", "—", "—", "—", "—", "—"])
+            if info.get("reason"):
+                reasons.append((label, info["reason"]))
+
+    lines = ["ALETHEIA HOST TOKEN TELEMETRY", ""]
+    lines.extend(
+        render_text_table(
+            ["Host", "Status", "Input", "Output", "Cache write", "Cache read", "Billable tokens", "Msgs"],
+            rows,
+        ).splitlines()
+    )
+    lines.append("")
+    lines.append(
+        f"Total billable tokens across measured hosts: {billable_total:,}"
+        if billable_total else
+        "No host on this machine persisted a measurable token count."
+    )
+    lines.append("Billable tokens = input + output + cache write. Cache reads are reported apart")
+    lines.append("and never blended in: they cost a fraction of fresh input.")
+    if reasons:
+        lines.append("")
+        lines.append("Why some hosts are unavailable:")
+        for label, reason in reasons:
+            lines.append(f"  {label}: {clip_cells(reason, 110)}")
+    lines.append("")
+    lines.append("These totals cover the scanned session files only, not all historical usage.")
+    return "\n".join(lines)
 
 
 def render_report_markdown(records: list[dict[str, Any]], as_text: bool = False) -> str:
@@ -2524,11 +2854,13 @@ def render_report_markdown(records: list[dict[str, Any]], as_text: bool = False)
     add("| `measured` | read directly from host session files on this machine |")
     add("| `est` | estimated from measured characters via a documented bytes-per-token constant |")
     add("| `unavailable` | the host exposes no such figure; deliberately left blank |")
+    add("| unit | every figure is a count of **tokens** |")
+    add("| `billable` | input + output + cache write — cache reads are excluded and counted apart |")
     add("")
 
     last_cmp = _latest_comparison(records)
-    without_tokens = last_cmp.get("without_aletheia", {}).get("metadata_tokens_est", "—")
-    with_tokens = last_cmp.get("with_aletheia_scoped", {}).get("metadata_tokens_est", "—")
+    without_tokens = last_cmp.get("without_aletheia", {}).get("metadata_tokens_est")
+    with_tokens = last_cmp.get("with_aletheia_scoped", {}).get("metadata_tokens_est")
     saved = last_cmp.get("saved_tokens_est")
     pct = last_cmp.get("saved_percent")
 
@@ -2536,11 +2868,17 @@ def render_report_markdown(records: list[dict[str, Any]], as_text: bool = False)
     add("")
     add("| Metric | Value | Basis |")
     add("| --- | ---: | --- |")
-    add(f"| Metadata tokens, no routing | {n(without_tokens)} | estimated |")
-    add(f"| Metadata tokens, scoped | {n(with_tokens)} | estimated |")
+    if isinstance(without_tokens, int):
+        add(f"| Metadata tokens, no routing | {n(without_tokens)} | estimated |")
+    else:
+        add("| Metadata tokens, no routing | unavailable | no recorded comparison yet |")
+    if isinstance(with_tokens, int):
+        add(f"| Metadata tokens, scoped | {n(with_tokens)} | estimated |")
+    else:
+        add("| Metadata tokens, scoped | unavailable | no recorded comparison yet |")
     if isinstance(saved, int):
         add(f"| Reduction | {n(saved)} ({pct}%) | estimated |")
-    add("| Actual host tokens | see per-host table below | measured where the host logs it |")
+    add("| Actual host billable tokens | see per-host table below | measured where the host logs it |")
     add("")
 
     telemetry: dict[str, Any] = {}
@@ -2551,25 +2889,33 @@ def render_report_markdown(records: list[dict[str, Any]], as_text: bool = False)
     if telemetry:
         add("## Actual host usage, read from session files")
         add("")
-        add("| Host | Status | Input | Output | Cache read | Cache write | Messages |")
-        add("| --- | --- | ---: | ---: | ---: | ---: | ---: |")
+        add("| Host | Status | Input | Output | Cache read | Cache write | Billable tokens | Messages |")
+        add("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+        billable_total = 0
         for info in telemetry.values():
             label = info.get("label", "?")
+            billable = _billable_tokens(info)
             if info.get("available"):
+                if isinstance(billable, int):
+                    billable_total += billable
                 add(
                     f"| {label} | {tag('measured')} | {n(info['input_tokens'])} | {n(info['output_tokens'])} |"
                     f" {n(info['cache_read_tokens'])} | {n(info['cache_write_tokens'])} |"
+                    f" {n(billable) if isinstance(billable, int) else 'unavailable'} |"
                     f" {n(info['messages_with_usage'])} |"
                 )
             else:
                 reason = info.get("reason", "")
-                add(f"| {label} | {tag('unavailable')} | — | — | — | — | — |")
+                add(f"| {label} | {tag('unavailable')} | — | — | — | — | — | — |")
                 if reason:
                     # Indented continuation row, so the reason stays attached to
                     # its host instead of floating as a stray line.
-                    add(f"| ↳ reason | {reason} | | | | | |")
+                    add(f"| ↳ reason | {reason} | | | | | | |")
         add("")
-        add("_Cache reads cost a fraction of fresh input, so they are never blended into one total._")
+        if billable_total:
+            add(f"_Total billable tokens across measured hosts: {n(billable_total)}._")
+        add("_Billable tokens = input + output + cache write. Cache reads cost a fraction of "
+            "fresh input, so they are reported apart and never blended into a billable total._")
         add("")
 
     if records:
@@ -2619,20 +2965,7 @@ def render_report_markdown(records: list[dict[str, Any]], as_text: bool = False)
 
     text = "\n".join(lines)
     if as_text:
-        # Strip Markdown syntax a plain terminal or chat bubble cannot render,
-        # while keeping every heading rule and all column alignment.
-        out = []
-        for line in text.splitlines():
-            line = re.sub(r"^#+\s*", lambda m: "=" * len(m.group(0)) + " ", line)
-            line = re.sub(r"^>\s*", "", line)
-            line = re.sub(r"\*\*(.+?)\*\*", r"\1", line)      # bold
-            line = re.sub(r"`(.+?)`", r"\1", line)             # inline code
-            line = line.replace("_", "")
-            line = re.sub(r"^-\s+", "- ", line)
-            line = re.sub(r"^\|\s*---.*$", "  " + "-" * 40, line)
-            line = re.sub(r"\s*\|\s*", "  ", line)
-            out.append(line.rstrip())
-        text = "\n".join(out)
+        text = _plain_text(lines)
     return text
 
 
@@ -3341,6 +3674,9 @@ def main(argv: list[str] | None = None) -> int:
             cmd.add_argument("task", help="user task text; avoid secrets, especially if logging command line")
             cmd.add_argument("--top", type=int, default=DEFAULT_TOP)
             cmd.add_argument("--threshold", type=int, default=DEFAULT_THRESHOLD)
+            cmd.add_argument("--format", choices=("json", "text"), default="json",
+                             help="text = aligned candidate picker with score bars (default json)")
+            cmd.add_argument("--ascii", action="store_true", help="ASCII glyphs in --format text")
     ev = sub.add_parser("eval", help="evaluate retrieval against a JSON case file")
     ev.add_argument("--root", action="append", default=[])
     ev.add_argument("--cases", required=True)
@@ -3366,6 +3702,8 @@ def main(argv: list[str] | None = None) -> int:
     inv.add_argument("--query", default=None, help="filter by substring across name and description")
     inv.add_argument("--limit", type=int, default=50, help="max rows (0 for all)")
     inv.add_argument("--json", action="store_true", help="machine-readable output (default)")
+    inv.add_argument("--format", choices=("json", "text"), default="json",
+                     help="text = aligned numbered picker for humans (default json)")
 
     mode = sub.add_parser("mode", help="show or set the owner's auto/manual selection preference")
     mode.add_argument("--config", type=Path, default=None, help="config path (default aletheia-config.json)")
@@ -3404,9 +3742,13 @@ def main(argv: list[str] | None = None) -> int:
     tel.add_argument("--host", action="append", default=[], help="restrict to a host id, or 'all'; omit for every known host")
     tel.add_argument("--record", type=Path, default=None, help="append this measurement to the ledger")
     tel.add_argument("--ledger", type=Path, default=None, help="override ledger location")
+    tel.add_argument("--format", choices=("json", "text"), default="json",
+                     help="text = aligned usage table with the billable-token total (default json)")
 
     hosts_cmd = sub.add_parser("hosts", help="list every supported agent host and what can be read from it")
     hosts_cmd.add_argument("--json", action="store_true", help="machine-readable output (default)")
+    hosts_cmd.add_argument("--format", choices=("json", "text"), default="json",
+                           help="text = aligned capability table (default json)")
 
     est_cmd = sub.add_parser(
         "estimate",
@@ -3452,14 +3794,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "hosts":
-        print(json.dumps({
+        payload = {
             "supported": list_hosts(),
             "skill_roots": [str(p) for p in host_skill_roots() if p.is_dir()],
             "note": (
                 "A host without telemetry is still supported for skill discovery and routing. "
                 "Usage figures are only produced where the host actually persists them."
             ),
-        }, ensure_ascii=False, indent=2))
+        }
+        if getattr(args, "format", "json") == "text" and not args.json:
+            print(render_hosts_text(payload))
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "telemetry":
@@ -3467,7 +3813,11 @@ def main(argv: list[str] | None = None) -> int:
         usage = collect_host_usage(since_days=args.since_days, hosts=hosts)
         payload = {
             "measured": True,
-            "note": "Read from host session files on disk. Hosts without persisted usage are marked unavailable, not zero.",
+            "note": (
+                "Read from host session files on disk. Hosts without persisted usage are marked "
+                "unavailable, not zero. All figures are tokens: billable tokens = input + output "
+                "+ cache write; cache reads are counted apart and never blended in."
+            ),
             "hosts": usage,
         }
         if args.record:
@@ -3483,7 +3833,10 @@ def main(argv: list[str] | None = None) -> int:
             }
             append_ledger(record, base=(args.ledger.parent if args.ledger else None))
             payload["recorded"] = str(args.record)
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        if getattr(args, "format", "json") == "text":
+            print(render_telemetry_text(usage))
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "estimate":
@@ -3605,7 +3958,10 @@ def main(argv: list[str] | None = None) -> int:
         roots = _roots(args)
         skills, issues = discover(roots)
         payload = build_inventory(skills, issues, roots, query=args.query, limit=args.limit)
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        if getattr(args, "format", "json") == "text" and not args.json:
+            print(render_inventory_text(payload))
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "mode":
@@ -3729,6 +4085,9 @@ def main(argv: list[str] | None = None) -> int:
         payload = route(args.task, skills, args.top, args.threshold)
         payload["issues"] = issues
         payload["scope"] = scope_payload
+        if getattr(args, "format", "json") == "text":
+            print(render_route_text(payload, task=args.task, ascii_only=bool(getattr(args, "ascii", False))))
+            return 0
     else:
         try:
             cases = json.loads(Path(args.cases).read_text(encoding="utf-8"))

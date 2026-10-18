@@ -364,6 +364,8 @@ Gemini CLI            -   0      -                              unavailable
 ```
 
 cache read 单独统计而不并入总计——它便宜得多，混在一起成本会错一个数量级。
+对外报出的 **billable tokens（计费 token）** 就是 input + output + cache write 之和
+——绝不含 cache read，标签上「tokens」这个词也绝不省略。
 
 **明确拒绝估算的三项**：避免选错 skill 重做的节省（需真实 A/B）、用与不用的实际差
 （该宿主无遥测）、省钱金额（需单价+实测）。`--actual-tokens` 只能填你从宿主读到的数。
@@ -427,8 +429,9 @@ python skills/aletheia/scripts/router.py report --format text       # 聊天窗�
 格式按 `--format` → 输出扩展名 → 默认 HTML 依次判定。不给 `--out` 就直接输出到
 stdout，可以直接粘贴。
 
-**文本形态是排好版的文档，不是数据倾倒**：标题分隔线、列对齐、出处图例、
-每个数字标注 measured / estimated / unavailable。聊天框里甩一堆裸数字**不在可选范围内**。
+**文本形态是排好版的文档，不是数据倾倒**：标题分隔线、列对齐（混排中文也不歪——
+一个汉字占两个终端格）、出处图例、每个数字标注单位和 measured / estimated /
+unavailable。聊天框里甩一堆裸数字**不在可选范围内**。
 
 ## 不依赖宿主的自主计量
 
@@ -652,11 +655,21 @@ python skills/aletheia/scripts/router.py context --transcripts <dir> --host clau
 # 进度条
 python skills/aletheia/scripts/router.py progress "read" "write" "verify" --done 1
 
+# 给人看的文本视图
+python skills/aletheia/scripts/router.py inventory --format text
+python skills/aletheia/scripts/router.py route "做一份 PPT" --format text
+python skills/aletheia/scripts/router.py telemetry --format text
+
 # 单元测试
 python -m unittest discover -s tests -v
 ```
 
-所有子命令**一律向 stdout 输出 JSON** —— 没有 `--json` 参数，因为不存在其他格式。
+所有子命令**默认向 stdout 输出 JSON** —— 这是机器契约。另有四个命令为终端前的人
+提供纯文本形态：`inventory --format text`（编号点选清单，描述自动截断）、
+`route --format text`（每个候选一条评分条 + 命中信号；`--ascii` 适配不支持制表符的
+终端）、`hosts --format text`（能力对照表：可计量 vs 无 token 遥测）、
+`telemetry --format text`（用量表 + 计费 token 总计 + 每个 `unavailable` 的原因）。
+`report` 的格式按 `--format` → 输出扩展名依次判定。
 失败时输出 `{"error": "..."}` 并以 `2` 退出。
 argparse 仍负责真正的参数解析错误（未知子命令、缺参数），因为那发生在命令语义之前，
 用它的用法提示才对。

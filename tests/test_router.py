@@ -863,6 +863,97 @@ class RouterTests(unittest.TestCase):
                              .get(suffix, "html"))
         self.assertEqual(cases[".md"], "md")
 
+    def test_text_tables_stay_aligned_with_cjk_content(self):
+        """A CJK glyph occupies two terminal cells; padding by len() skews rows."""
+        self.assertEqual(4, router.display_width("名称"))
+        self.assertEqual(3, router.display_width("a名"))
+        self.assertEqual("甲" + "   ", router.pad_cells("甲", 5))
+        self.assertEqual(" " + "甲" + "  ", router.pad_cells("甲", 5, "center"))
+        self.assertEqual("甲乙…", router.clip_cells("甲乙丙丁", 5))
+        self.assertEqual(5, router.display_width(router.clip_cells("甲乙丙丁", 5)))
+
+        rows = [["名称", "42"], ["abcd", "7"], ["甲乙丙", "1,003"]]
+        lines = router.render_text_table(["Skill 名称", "Count"], rows).splitlines()
+        self.assertEqual(5, len(lines))
+        w1, w2 = 10, 5  # display widths: "Skill 名称" -> 10, "Count"/"1,003" -> 5
+        self.assertEqual(w1, router.display_width("Skill 名称"))
+        expected = [
+            router.pad_cells("Skill 名称", w1) + "  " + router.pad_cells("Count", w2, "right"),
+            "-" * w1 + "  " + "-" * w2,
+            router.pad_cells("名称", w1) + "  " + router.pad_cells("42", w2, "right"),
+            router.pad_cells("abcd", w1) + "  " + router.pad_cells("7", w2, "right"),
+            router.pad_cells("甲乙丙", w1) + "  " + router.pad_cells("1,003", w2, "right"),
+        ]
+        self.assertEqual(expected, lines)
+        # Every line occupies the same number of display cells: that is what
+        # alignment *means* for a terminal showing mixed scripts.
+        self.assertEqual(1, len({router.display_width(line) for line in lines}))
+
+    def test_report_calls_the_unit_tokens_and_defines_billable(self):
+        """'Billable' alone hides the unit; the count is always tokens."""
+        for as_text in (True, False):
+            body = router.render_report_markdown(self._sample_records(), as_text=as_text)
+            self.assertIn("count of", body)
+            self.assertIn("input + output + cache write", body)
+            self.assertIn("492,389", body)  # 58 + 8,951 + 483,380
+
+    def test_daily_check_summary_labels_billable_tokens(self):
+        """The daily digest must not print a bare 'billable' with no unit."""
+        spec = importlib.util.spec_from_file_location(
+            "daily_check_under_test", ROOT / "scripts" / "daily_check.py")
+        daily = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = daily
+        spec.loader.exec_module(daily)
+        audit = {"scanned": 3, "recommendations": [], "fix_applied": False,
+                 "counts": {"ok": 3, "broken": 0, "blocking": 0, "stale": 0, "duplicate": 0}}
+        telemetry = {"hosts": {
+            "claude": {"available": True, "label": "Claude Code",
+                       "billable_tokens_excluding_cache_read": 492389},
+            "workbuddy": {"available": False, "label": "WorkBuddy"},
+        }}
+        summary = daily.build_summary(audit, telemetry)
+        self.assertIn("492,389 billable tokens", summary)
+        self.assertIn("input + output + cache write", summary)
+
+    def test_inventory_text_is_a_numbered_picker(self):
+        skills, issues = router.discover([self.fixtures])
+        inv = router.build_inventory(skills, issues, [self.fixtures], limit=0)
+        text = router.render_inventory_text(inv)
+        self.assertIn("ALETHEIA SKILL INVENTORY", text)
+        self.assertIn("Reply with one or more numbers", text)
+        self.assertRegex(text, r"(?m)^1\s+\S")  # first entry is pickable by number
+        for entry in inv["entries"][:3]:
+            self.assertIn(entry["name"], text)
+
+    def test_route_text_shows_scored_candidates(self):
+        skills, _ = router.discover([self.fixtures])
+        payload = router.route("pdf", skills, top=3, threshold=1)
+        text = router.render_route_text(payload, task="pdf")
+        self.assertIn("ALETHEIA ROUTE", text)
+        self.assertIn("Read the candidate SKILL.md in full", text)
+        if payload["candidates"]:
+            self.assertIn(payload["candidates"][0]["name"], text)
+            self.assertIn("Score", text)
+
+    def test_telemetry_text_totals_billable_tokens(self):
+        usage = self._sample_records()[-1]["host_telemetry"]
+        text = router.render_telemetry_text(usage)
+        self.assertIn("Billable tokens", text)
+        self.assertIn("input + output + cache write", text)
+        # Older ledger records predate the explicit field; the fallback sums
+        # the three buckets instead of inventing a zero.
+        self.assertIn("492,389", text)
+        self.assertIn("unavailable", text)
+        self.assertIn("does not persist token usage", text)
+
+    def test_hosts_text_reports_what_is_measurable(self):
+        text = router.render_hosts_text({"supported": router.list_hosts(),
+                                         "skill_roots": [], "note": "note"})
+        for host in router.list_hosts():
+            self.assertIn(host["id"], text)
+        self.assertIn("measured", text)
+        self.assertIn("no token telemetry", text)
+
     def test_tests_do_not_assert_platform_specific_input_universally(self):
         """Guard against the trap that cost two CI rounds.
 

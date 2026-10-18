@@ -434,7 +434,9 @@ Gemini CLI            -   0      -                              unavailable
 ```
 
 Cache reads are counted separately from fresh input because they cost a fraction
-of it; blending them would misstate cost by an order of magnitude.
+of it; blending them would misstate cost by an order of magnitude. The count
+reported as **billable tokens** is input + output + cache write — never cache
+reads, and the word "tokens" is never dropped from the label.
 
 **What is refused rather than estimated:**
 
@@ -510,9 +512,10 @@ python skills/aletheia/scripts/router.py report --format text       # chat or te
 The format follows `--format`, then the output extension, then HTML. With no
 `--out` the report prints to stdout, ready to paste.
 
-The text tier is a **formatted document, not a dump**: heading rules, aligned
-columns, a provenance legend, and every figure labelled. Bare numbers in a chat
-bubble are not offered as a mode.
+The text tier is a **formatted document, not a dump**: heading rules, columns
+that stay aligned even with Chinese content (a CJK glyph occupies two terminal
+cells), a provenance legend, and every figure labelled with its unit. Bare
+numbers in a chat bubble are not offered as a mode.
 
 ## Measuring without asking the host
 
@@ -750,15 +753,26 @@ python skills/aletheia/scripts/router.py context --transcripts <dir> --host clau
 # Progress bar over a declared step list
 python skills/aletheia/scripts/router.py progress "read" "write" "verify" --done 1
 
+# Human-readable views of the same data
+python skills/aletheia/scripts/router.py inventory --format text
+python skills/aletheia/scripts/router.py route "analyze this spreadsheet" --format text
+python skills/aletheia/scripts/router.py telemetry --format text
+
 # Tests
 python -m unittest discover -s tests -v
 ```
 
-Every subcommand prints **JSON on stdout**, always — there is no `--json` flag
-because there is no other format. A failure prints `{"error": "..."}` and exits
-`2`. Argparse still handles genuine argument-parsing errors (an unknown
-subcommand, a missing value) with its own usage message, since those happen
-before any command semantics exist.
+Every subcommand prints **JSON on stdout** by default — that is the machine
+contract. Four commands also speak plain text for the human holding the
+terminal: `inventory --format text` (numbered picker with clipped
+descriptions), `route --format text` (score bars and match signals per
+candidate; `--ascii` for terminals without box drawing), `hosts --format text`
+(capability table: measured vs no token telemetry), and `telemetry --format
+text` (usage table with the billable-token total). `report` picks its format
+from `--format`, then the output extension. A failure prints `{"error": "..."}`
+and exits `2`. Argparse still handles genuine argument-parsing errors (an
+unknown subcommand, a missing value) with its own usage message, since those
+happen before any command semantics exist.
 
 `route` never executes a discovered skill. The `score` is a hand-tuned ordering
 signal — not a probability, not a success rate, and not calibrated. Read the
