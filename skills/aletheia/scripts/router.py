@@ -1036,7 +1036,7 @@ def compare_scenarios(baseline: dict[str, Any], scoped: dict[str, Any]) -> dict[
             {
                 "claim": "money saved",
                 "value": UNAVAILABLE,
-                "why": "Requires a per-token price and a measured billable token count; neither is available here.",
+                "why": "Requires a per-token price and a measured token count; neither is available here.",
             },
         ],
         "how_to_get_real_numbers": [
@@ -1098,18 +1098,18 @@ def render_report_html(records: list[dict[str, Any]]) -> str:
                 value = _info.get(key)
                 return f"{value:,}" if isinstance(value, int) else _esc(value)
 
-            billable = _billable_tokens(info)
-            billable_cell = f"{billable:,}" if isinstance(billable, int) else "unavailable"
+            tokens = _token_total(info)
+            tokens_cell = f"{tokens:,}" if isinstance(tokens, int) else "unavailable"
             host_cards += (
                 '<div class="card measured-card">'
                 f'<h3>{label} <span class="ok">measured</span></h3>'
-                f'<p class="big">{billable_cell} <span class="est">billable tokens</span></p>'
+                f'<p class="big">{tokens_cell} <span class="est">tokens</span></p>'
                 f'<p class="why">input {num("input_tokens")} · output {num("output_tokens")}'
-                f' · cache write {num("cache_write_tokens")} — that sum is the billable count'
+                f' · cache write {num("cache_write_tokens")} — that sum is the token count'
                 f' (input + output + cache write)</p>'
                 f'<p class="why">cache read {num("cache_read_tokens")} · total incl. cache read'
                 f' {num("total_tokens_including_cache_read")} · cache reads are reported apart'
-                f' and never blended into the billable total</p>'
+                f' and never blended into the total</p>'
                 f'<p class="why">{_esc(info.get("messages_with_usage"))} messages across'
                 f' {_esc(info.get("sessions_scanned"))} session file(s)</p>'
                 "</div>"
@@ -1820,7 +1820,7 @@ def collect_host_usage(
                 "output_tokens": UNAVAILABLE, "cache_read_tokens": UNAVAILABLE,
                 "cache_write_tokens": UNAVAILABLE,
                 "total_tokens_including_cache_read": UNAVAILABLE,
-                "billable_tokens_excluding_cache_read": UNAVAILABLE,
+                "tokens": UNAVAILABLE,
                 "provenance": UNAVAILABLE,
                 "reason": f"unknown host {host!r}; known: {', '.join(sorted(TELEMETRY_HOSTS))}",
                 "price_note": PRICE_HINT,
@@ -1900,7 +1900,7 @@ def collect_host_usage(
                 messages += sq_rows
 
         measurable = messages > 0
-        billable = totals["input"] + totals["output"] + totals["cache_write"]
+        counted = totals["input"] + totals["output"] + totals["cache_write"]
         record_out = {
             "available": measurable,
             "label": spec["label"],
@@ -1910,8 +1910,8 @@ def collect_host_usage(
             "output_tokens": totals["output"] if measurable else UNAVAILABLE,
             "cache_read_tokens": totals["cache_read"] if measurable else UNAVAILABLE,
             "cache_write_tokens": totals["cache_write"] if measurable else UNAVAILABLE,
-            "total_tokens_including_cache_read": (billable + totals["cache_read"]) if measurable else UNAVAILABLE,
-            "billable_tokens_excluding_cache_read": billable if measurable else UNAVAILABLE,
+            "total_tokens_including_cache_read": (counted + totals["cache_read"]) if measurable else UNAVAILABLE,
+            "tokens": counted if measurable else UNAVAILABLE,
             "provenance": "read directly from host session files" if measurable else UNAVAILABLE,
             "reason": "" if measurable else (
                 sqlite_note or reason or
@@ -2592,14 +2592,14 @@ def _latest_comparison(records: list[dict[str, Any]]) -> dict[str, Any]:
     return {}
 
 
-def _billable_tokens(info: dict[str, Any]) -> int | None:
-    """Billable tokens for a telemetry record: input + output + cache write.
+def _token_total(info: dict[str, Any]) -> int | None:
+    """Token count for a telemetry record: input + output + cache write.
 
     Older ledger records predate the explicit field, so fall back to summing
     the three buckets. Returns None when any part is not a real measurement —
     a missing number must never become a zero.
     """
-    value = info.get("billable_tokens_excluding_cache_read")
+    value = info.get("tokens")
     if isinstance(value, int):
         return value
     parts = [info.get(key) for key in ("input_tokens", "output_tokens", "cache_write_tokens")]
@@ -2768,16 +2768,16 @@ def render_hosts_text(payload: dict[str, Any]) -> str:
 
 
 def render_telemetry_text(usage: dict[str, Any]) -> str:
-    """Per-host token usage as one aligned table with an honest billable total."""
+    """Per-host token usage as one aligned table with an honest total."""
     rows: list[list[str]] = []
-    billable_total = 0
+    token_total = 0
     reasons: list[tuple[str, str]] = []
     for host, info in usage.items():
         label = info.get("label", host)
-        billable = _billable_tokens(info)
+        tokens = _token_total(info)
         if info.get("available"):
-            if isinstance(billable, int):
-                billable_total += billable
+            if isinstance(tokens, int):
+                token_total += tokens
             def n(value: Any) -> str:
                 return f"{value:,}" if isinstance(value, int) else "—"
             rows.append([
@@ -2787,7 +2787,7 @@ def render_telemetry_text(usage: dict[str, Any]) -> str:
                 n(info.get("output_tokens")),
                 n(info.get("cache_write_tokens")),
                 n(info.get("cache_read_tokens")),
-                f"{billable:,}" if isinstance(billable, int) else "unavailable",
+                f"{tokens:,}" if isinstance(tokens, int) else "unavailable",
                 n(info.get("messages_with_usage")),
             ])
         else:
@@ -2798,17 +2798,17 @@ def render_telemetry_text(usage: dict[str, Any]) -> str:
     lines = ["ALETHEIA HOST TOKEN TELEMETRY", ""]
     lines.extend(
         render_text_table(
-            ["Host", "Status", "Input", "Output", "Cache write", "Cache read", "Billable tokens", "Msgs"],
+            ["Host", "Status", "Input", "Output", "Cache write", "Cache read", "Tokens", "Msgs"],
             rows,
         ).splitlines()
     )
     lines.append("")
     lines.append(
-        f"Total billable tokens across measured hosts: {billable_total:,}"
-        if billable_total else
+        f"Total tokens across measured hosts: {token_total:,}"
+        if token_total else
         "No host on this machine persisted a measurable token count."
     )
-    lines.append("Billable tokens = input + output + cache write. Cache reads are reported apart")
+    lines.append("Tokens = input + output + cache write. Cache reads are reported apart")
     lines.append("and never blended in: they cost a fraction of fresh input.")
     if reasons:
         lines.append("")
@@ -2855,7 +2855,7 @@ def render_report_markdown(records: list[dict[str, Any]], as_text: bool = False)
     add("| `est` | estimated from measured characters via a documented bytes-per-token constant |")
     add("| `unavailable` | the host exposes no such figure; deliberately left blank |")
     add("| unit | every figure is a count of **tokens** |")
-    add("| `billable` | input + output + cache write — cache reads are excluded and counted apart |")
+    add("| `tokens` | input + output + cache write — cache reads are excluded and counted apart |")
     add("")
 
     last_cmp = _latest_comparison(records)
@@ -2878,7 +2878,7 @@ def render_report_markdown(records: list[dict[str, Any]], as_text: bool = False)
         add("| Metadata tokens, scoped | unavailable | no recorded comparison yet |")
     if isinstance(saved, int):
         add(f"| Reduction | {n(saved)} ({pct}%) | estimated |")
-    add("| Actual host billable tokens | see per-host table below | measured where the host logs it |")
+    add("| Actual host tokens | see per-host table below | measured where the host logs it |")
     add("")
 
     telemetry: dict[str, Any] = {}
@@ -2889,19 +2889,19 @@ def render_report_markdown(records: list[dict[str, Any]], as_text: bool = False)
     if telemetry:
         add("## Actual host usage, read from session files")
         add("")
-        add("| Host | Status | Input | Output | Cache read | Cache write | Billable tokens | Messages |")
+        add("| Host | Status | Input | Output | Cache read | Cache write | Tokens | Messages |")
         add("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |")
-        billable_total = 0
+        token_total = 0
         for info in telemetry.values():
             label = info.get("label", "?")
-            billable = _billable_tokens(info)
+            tokens = _token_total(info)
             if info.get("available"):
-                if isinstance(billable, int):
-                    billable_total += billable
+                if isinstance(tokens, int):
+                    token_total += tokens
                 add(
                     f"| {label} | {tag('measured')} | {n(info['input_tokens'])} | {n(info['output_tokens'])} |"
                     f" {n(info['cache_read_tokens'])} | {n(info['cache_write_tokens'])} |"
-                    f" {n(billable) if isinstance(billable, int) else 'unavailable'} |"
+                    f" {n(tokens) if isinstance(tokens, int) else 'unavailable'} |"
                     f" {n(info['messages_with_usage'])} |"
                 )
             else:
@@ -2912,10 +2912,10 @@ def render_report_markdown(records: list[dict[str, Any]], as_text: bool = False)
                     # its host instead of floating as a stray line.
                     add(f"| ↳ reason | {reason} | | | | | | |")
         add("")
-        if billable_total:
-            add(f"_Total billable tokens across measured hosts: {n(billable_total)}._")
-        add("_Billable tokens = input + output + cache write. Cache reads cost a fraction of "
-            "fresh input, so they are reported apart and never blended into a billable total._")
+        if token_total:
+            add(f"_Total tokens across measured hosts: {n(token_total)}._")
+        add("_Tokens = input + output + cache write. Cache reads cost a fraction of "
+            "fresh input, so they are reported apart and never blended into the total._")
         add("")
 
     if records:
@@ -3743,7 +3743,7 @@ def main(argv: list[str] | None = None) -> int:
     tel.add_argument("--record", type=Path, default=None, help="append this measurement to the ledger")
     tel.add_argument("--ledger", type=Path, default=None, help="override ledger location")
     tel.add_argument("--format", choices=("json", "text"), default="json",
-                     help="text = aligned usage table with the billable-token total (default json)")
+                     help="text = aligned usage table with the token total (default json)")
 
     hosts_cmd = sub.add_parser("hosts", help="list every supported agent host and what can be read from it")
     hosts_cmd.add_argument("--json", action="store_true", help="machine-readable output (default)")
@@ -3815,8 +3815,8 @@ def main(argv: list[str] | None = None) -> int:
             "measured": True,
             "note": (
                 "Read from host session files on disk. Hosts without persisted usage are marked "
-                "unavailable, not zero. All figures are tokens: billable tokens = input + output "
-                "+ cache write; cache reads are counted apart and never blended in."
+                "unavailable, not zero. All figures are tokens; the `tokens` count is input + "
+                "output + cache write, and cache reads are counted apart and never blended in."
             ),
             "hosts": usage,
         }

@@ -150,7 +150,7 @@ Refused — listed with the reason, because guessing would be fabrication:
 | --- | --- | --- |
 | Tokens saved by not redoing the wrong skill | `unavailable` | Needs a real A/B run on the same task |
 | Actual host usage with vs without | `unavailable` | No telemetry on this host |
-| Money saved | `unavailable` | Needs a price and a measured billable count |
+| Money saved | `unavailable` | Needs a price and a measured token count |
 
 Only the metadata saving is measurable from a single run. Everything else needs
 two runs and the host's own numbers — and saying so is more useful than a

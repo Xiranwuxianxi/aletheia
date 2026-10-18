@@ -9,15 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Every number now says what it counts, and every human-facing view is laid out
 for reading — with columns that stay straight even in Chinese.
 
-### The unit is tokens, said out loud
+### The unit is tokens, said plainly
 
-A bare "billable" label hides what is being counted. Every surface — the HTML,
-markdown and text reports, the telemetry view, and the daily digest — now
-prints **billable tokens**, and defines the sum where the number appears:
-input + output + cache write. Cache reads stay in their own column and are
-never folded into that total, because they bill at a fraction of fresh input.
-The report's legend gains explicit `unit` and `billable` rows, and the per-host
-table gains a `Billable tokens` column with a measured-host total underneath.
+Every surface — the HTML, markdown and text reports, the telemetry view, and the
+daily digest — labels the total **tokens**, and defines the sum where the number
+appears: input + output + cache write. Cache reads stay in their own column and
+are never folded into that total, because they bill at a fraction of fresh input.
+The report's legend gains explicit `unit` and `tokens` rows, and the per-host
+table gains a `Tokens` column with a measured-host total underneath.
 
 ### Plain text that is actually typeset
 
@@ -36,7 +35,7 @@ JSON contract (JSON stays the default). `inventory` becomes a numbered picker
 with clipped descriptions and the "reply with a number" instruction;
 `route` shows score bars per candidate with the signals that matched; `hosts`
 prints one capability table (measured vs no token telemetry, per host);
-`telemetry` prints the usage table plus the billable total and a per-host
+`telemetry` prints the usage table plus the token total and a per-host
 reason for every `unavailable`. `route --ascii` swaps the bar glyphs for
 terminals without box drawing.
 

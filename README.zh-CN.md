@@ -364,8 +364,8 @@ Gemini CLI            -   0      -                              unavailable
 ```
 
 cache read 单独统计而不并入总计——它便宜得多，混在一起成本会错一个数量级。
-对外报出的 **billable tokens（计费 token）** 就是 input + output + cache write 之和
-——绝不含 cache read，标签上「tokens」这个词也绝不省略。
+对外报出的 **tokens**（各格式统一的那一个数）就是 input + output + cache write 之和
+——绝不含 cache read。
 
 **明确拒绝估算的三项**：避免选错 skill 重做的节省（需真实 A/B）、用与不用的实际差
 （该宿主无遥测）、省钱金额（需单价+实测）。`--actual-tokens` 只能填你从宿主读到的数。

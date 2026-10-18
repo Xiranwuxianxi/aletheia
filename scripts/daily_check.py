@@ -78,7 +78,7 @@ def build_summary(audit: dict, telemetry: dict, active: dict | None = None,
     hosts = telemetry.get("hosts", {})
     readable = [h for h, v in hosts.items() if v.get("available")]
     total = sum(
-        v.get("billable_tokens_excluding_cache_read", 0) or 0 for v in hosts.values() if v.get("available")
+        v.get("tokens", 0) or 0 for v in hosts.values() if v.get("available")
     )
 
     lines = [
@@ -100,7 +100,7 @@ def build_summary(audit: dict, telemetry: dict, active: dict | None = None,
     if readable:
         lines.append(
             f"Token usage read from {', '.join(hosts[h]['label'] for h in readable)}: "
-            f"{total:,} billable tokens (input + output + cache write; cache read excluded)"
+            f"{total:,} tokens (input + output + cache write; cache read excluded)"
         )
     missing = [v["label"] for v in hosts.values() if not v.get("available")]
     if missing:

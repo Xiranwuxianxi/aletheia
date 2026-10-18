@@ -643,7 +643,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(38, result["output_tokens"])
         self.assertEqual(1152, result["cache_read_tokens"])
         self.assertEqual(0, result["cache_write_tokens"])
-        self.assertEqual(30139, result["billable_tokens_excluding_cache_read"])
+        self.assertEqual(30139, result["tokens"])
 
     def test_skills_only_hosts_say_unavailable_never_zero(self):
         """豆包工作/千问办公 persist no token counts on disk.
@@ -889,16 +889,17 @@ class RouterTests(unittest.TestCase):
         # alignment *means* for a terminal showing mixed scripts.
         self.assertEqual(1, len({router.display_width(line) for line in lines}))
 
-    def test_report_calls_the_unit_tokens_and_defines_billable(self):
-        """'Billable' alone hides the unit; the count is always tokens."""
+    def test_report_names_the_unit_and_defines_the_total(self):
+        """Every figure is a token count, and the sum is defined where it appears."""
         for as_text in (True, False):
             body = router.render_report_markdown(self._sample_records(), as_text=as_text)
             self.assertIn("count of", body)
             self.assertIn("input + output + cache write", body)
             self.assertIn("492,389", body)  # 58 + 8,951 + 483,380
+            self.assertNotIn("billable", body.lower())
 
-    def test_daily_check_summary_labels_billable_tokens(self):
-        """The daily digest must not print a bare 'billable' with no unit."""
+    def test_daily_check_summary_reports_tokens(self):
+        """The daily digest prints a plain token count, never a bare label."""
         spec = importlib.util.spec_from_file_location(
             "daily_check_under_test", ROOT / "scripts" / "daily_check.py")
         daily = importlib.util.module_from_spec(spec)
@@ -907,12 +908,11 @@ class RouterTests(unittest.TestCase):
         audit = {"scanned": 3, "recommendations": [], "fix_applied": False,
                  "counts": {"ok": 3, "broken": 0, "blocking": 0, "stale": 0, "duplicate": 0}}
         telemetry = {"hosts": {
-            "claude": {"available": True, "label": "Claude Code",
-                       "billable_tokens_excluding_cache_read": 492389},
+            "claude": {"available": True, "label": "Claude Code", "tokens": 492389},
             "workbuddy": {"available": False, "label": "WorkBuddy"},
         }}
         summary = daily.build_summary(audit, telemetry)
-        self.assertIn("492,389 billable tokens", summary)
+        self.assertIn("492,389 tokens", summary)
         self.assertIn("input + output + cache write", summary)
 
     def test_inventory_text_is_a_numbered_picker(self):
@@ -935,10 +935,10 @@ class RouterTests(unittest.TestCase):
             self.assertIn(payload["candidates"][0]["name"], text)
             self.assertIn("Score", text)
 
-    def test_telemetry_text_totals_billable_tokens(self):
+    def test_telemetry_text_totals_tokens(self):
         usage = self._sample_records()[-1]["host_telemetry"]
         text = router.render_telemetry_text(usage)
-        self.assertIn("Billable tokens", text)
+        self.assertIn("Tokens", text)
         self.assertIn("input + output + cache write", text)
         # Older ledger records predate the explicit field; the fallback sums
         # the three buckets instead of inventing a zero.

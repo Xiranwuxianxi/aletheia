@@ -434,9 +434,9 @@ Gemini CLI            -   0      -                              unavailable
 ```
 
 Cache reads are counted separately from fresh input because they cost a fraction
-of it; blending them would misstate cost by an order of magnitude. The count
-reported as **billable tokens** is input + output + cache write — never cache
-reads, and the word "tokens" is never dropped from the label.
+of it; blending them would misstate cost by an order of magnitude. The **tokens**
+figure — the one reported everywhere, in every format — is input + output +
+cache write, and never cache reads.
 
 **What is refused rather than estimated:**
 
@@ -444,7 +444,7 @@ reads, and the word "tokens" is never dropped from the label.
 | --- | --- |
 | Tokens saved by not redoing a wrong skill | Needs a real A/B run on the same task |
 | Actual usage with vs without | No telemetry on that host |
-| Money saved | Needs a price and a measured billable count |
+| Money saved | Needs a price and a measured token count |
 
 `--actual-tokens` is only ever a number **you** read from the host. The tool will
 not derive it.
@@ -768,7 +768,7 @@ terminal: `inventory --format text` (numbered picker with clipped
 descriptions), `route --format text` (score bars and match signals per
 candidate; `--ascii` for terminals without box drawing), `hosts --format text`
 (capability table: measured vs no token telemetry), and `telemetry --format
-text` (usage table with the billable-token total). `report` picks its format
+text` (usage table with the token total). `report` picks its format
 from `--format`, then the output extension. A failure prints `{"error": "..."}`
 and exits `2`. Argparse still handles genuine argument-parsing errors (an
 unknown subcommand, a missing value) with its own usage message, since those
