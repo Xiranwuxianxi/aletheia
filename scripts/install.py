@@ -49,6 +49,10 @@ PROJECT_INSTRUCTIONS = {
     "opencode": "AGENTS.md",
     "hermes": ".hermes.md",
     "aider": "CONVENTIONS.md",
+    # pi walks up from the working directory looking for AGENTS.md (or
+    # CLAUDE.md); AGENTS.md is the house spelling and the one its own loader
+    # lists first after the override file.
+    "pi": "AGENTS.md",
 }
 GLOBAL_INSTRUCTIONS = {
     "claude": ".claude/CLAUDE.md",
@@ -64,6 +68,9 @@ GLOBAL_INSTRUCTIONS = {
     # Hermes reads SOUL.md for identity. Writing a routing hook into it would
     # overwrite the persona, so its own .hermes.md is used instead.
     "hermes": ".hermes.md",
+    # pi's agent root is ~/.pi/agent, and its context loader reads
+    # AGENTS.override.md then AGENTS.md from exactly that directory.
+    "pi": ".pi/agent/AGENTS.md",
 }
 # Never write these, whatever a host claims to read.
 PROTECTED_NAMES = {"SOUL.md", "USER.md", "IDENTITY.md", "MEMORY.md"}
@@ -88,8 +95,8 @@ def same_tree(src: Path, dst: Path) -> bool:
     )
 
 
-def load_registry() -> dict:
-    """Read TELEMETRY_HOSTS out of router.py without importing the world."""
+def load_router():
+    """Load router.py without importing the world."""
     import importlib.util
 
     router = Path(__file__).resolve().parents[1] / "skills/aletheia/scripts/router.py"
@@ -97,7 +104,12 @@ def load_registry() -> dict:
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    return module.TELEMETRY_HOSTS
+    return module
+
+
+def load_registry() -> dict:
+    """Read TELEMETRY_HOSTS out of router.py without importing the world."""
+    return load_router().TELEMETRY_HOSTS
 
 
 def bootstrap_text(target: Path, mode: str) -> str:
@@ -161,7 +173,8 @@ def main() -> int:
     # test writes to the developer's actual home directory.
     home = (args.home.expanduser() if args.home else Path.home()).resolve()
 
-    registry = load_registry()
+    router = load_router()
+    registry = router.TELEMETRY_HOSTS
     by_label = {host["label"].lower(): key for key, host in registry.items()}
     by_key = set(registry)
 
@@ -171,7 +184,10 @@ def main() -> int:
                 {
                     "key": key,
                     "label": host["label"],
-                    "skill_dirs": host.get("skills", ()),
+                    # Every platform's spelling, not just this machine's: a
+                    # Windows user reading --list still needs to know where a
+                    # Mac keeps the same host's skills.
+                    "skill_dirs": router.all_skill_paths(host),
                     "project_instructions": PROJECT_INSTRUCTIONS.get(key, "unavailable"),
                     "user_instructions": GLOBAL_INSTRUCTIONS.get(key, "unavailable"),
                 }
@@ -199,8 +215,10 @@ def main() -> int:
     if not selected:
         # Default to hosts whose own directory exists: installing into a host the
         # user does not have would create directories for software that is absent.
+        # Resolved per platform so a dict-declared app-data host is only matched
+        # by the spelling that can exist on this machine.
         selected = [k for k, h in registry.items()
-                    if any((home / s.lstrip("~/")).is_dir() for s in h.get("skills", ()))]
+                    if any((home / s.lstrip("~/")).is_dir() for s in router.skill_paths(h))]
 
     root = args.project.expanduser().resolve() if args.scope == "project" else home
     instructions_table = PROJECT_INSTRUCTIONS if args.scope == "project" else GLOBAL_INSTRUCTIONS
@@ -221,7 +239,9 @@ def main() -> int:
         # user scope targets the home-relative directory; project scope sits
         # beside the code, in the host's own subdirectory.
         if args.scope == "user":
-            bases = [home / s.lstrip("~/") for s in host.get("skills", ())]
+            # skill_paths() picks this platform's spelling: installing a Mac
+            # path onto Windows would create directories no host will ever read.
+            bases = [home / s.lstrip("~/") for s in router.skill_paths(host)]
             targets = [b / "aletheia" for b in bases]
         else:
             native = host.get("native_skill_dir")

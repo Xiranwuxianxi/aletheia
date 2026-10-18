@@ -4,7 +4,74 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 1.12.0 — 2026-10-17
+## 1.13.0 — 2026-10-18
+
+Three new mainstream hosts, per-OS skill paths, and a hook that makes the
+routing mechanical — while leaving the off switch in the owner's hands.
+
+### Registry: pi, Doubao Work and QwenWork — seventeen hosts
+
+The registry grows from fourteen to seventeen hosts, closing the gap for the
+agents people actually run:
+
+- **pi** — usage lives at `message.usage` with camelCase keys (`input`,
+  `output`, `cacheRead`, `cacheWrite`). pi's own `totalTokens`/`cost`/
+  `reasoning` fields are reported by pi and never summed into buckets:
+  `totalTokens` double-counts and `cost` is money, not tokens.
+- **Doubao Work (豆包工作)** — skills and sessions live under the Electron
+  app-data tree, so the directory is spelled per OS. A `skills` entry may now
+  be a dict keyed by `windows`/`darwin`/`linux`; `skill_paths()` resolves only
+  the platform that can exist here, `all_skill_paths()` documents every
+  spelling. The Windows spelling is verified against a real install; macOS and
+  Linux follow each OS's Electron convention and are registered as candidates.
+- **QwenWork (千问办公)** — Qoder's house spelling. Skills and slash commands
+  live under the machine-global `~/.qwenworkcn` (commands land in
+  `~/.qwenworkcn/commands`); no project-level skill directory is known.
+
+Doubao Work and QwenWork persist no token counts, so they report `unavailable`
+with the reason — never a confident `0`. `install.py` maps pi's instruction
+files (`AGENTS.md` project-level, `~/.pi/agent/AGENTS.md` user-level).
+
+### The hook: first turn guaranteed, owner in control
+
+`skills/aletheia/scripts/hook_prompt_submit.py` wires aletheia into a host's
+hook runtime so the routing runs **before the model can decide anything**:
+
+- **`SessionStart`** injects the routing protocol at the first turn of every
+  conversation; **`UserPromptSubmit`** injects advisory candidates for each
+  prompt after that. First turn is covered twice over.
+- Output is the documented JSON envelope
+  (`hookSpecificOutput.additionalContext`); exit code is always 0 — a hook must
+  never block the owner's message. Prompt text is used in-process and never
+  echoed. Retrieval failure degrades honestly: it says so instead of inventing
+  candidates.
+- **Nothing is hardwired.** `router.py hook` shows what is active and which
+  file decided it; `--set off` silences the injection instantly (a true no-op —
+  no host settings edit, no re-approval); `--events` narrows which events
+  inject. Preferences resolve nearest-first across `aletheia-session.json`
+  (per session), `aletheia-config.json` (per project) and `~/.aletheia/config.json`
+  (machine-wide).
+- Discovered skills are cached (`~/.aletheia/`, TTL 600s, snapshot age always
+  printed) so a 1500-skill library does not add seconds to every prompt.
+
+The hook guarantees the injection, not the model's obedience — that gap is
+disclosed, not papered over.
+
+### Fixed
+
+- **`mode --set` no longer clobbers the config file.** It wrote `{"mode": ...}`
+  over the whole of `aletheia-config.json`, silently erasing `hook` preferences
+  and any allowlist. Both writers merge now.
+- **The symlink guard no longer fails where symlinks are impossible.** Some
+  sandboxes swallow `symlink_to()` — no exception, nothing on disk — leaving
+  the guard asserting on a probe that never happened. The probe now verifies
+  the link exists and skips honestly when the environment cannot create one.
+
+### Docs
+
+Both READMEs document the seventeen hosts (including Doubao Work's three OS
+spellings and QwenWork's two skill directories) and the hook's owner controls;
+the structural guards enforce the parity.
 
 Makes the skill installable into every host it knows about, and fixes three
 registry errors that made whole hosts invisible.

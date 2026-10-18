@@ -83,12 +83,81 @@ python scripts/install.py --scope user --bootstrap
 | Qwen Code | — | `~/.qwen/skills/aletheia/` |
 | Gemini CLI | — | `~/.gemini/skills/aletheia/` |
 | GitHub Copilot CLI | — | `~/.copilot/skills/aletheia/` |
+| pi | `.pi/skills/aletheia/` | `~/.pi/agent/skills/aletheia/` |
+| Doubao Work（豆包工作） | — | 见下方分系统路径 |
+| QwenWork（千问办公） | — | `~/.qwenworkcn/skills/aletheia/` |
+
+**Doubao Work** 遵循 Electron 应用数据目录布局，skill 目录按操作系统拼写不同
+（Windows 拼写经真机验证；macOS / Linux 按各系统 Electron 惯例注册为候选路径）：
+
+```text
+~/AppData/Local/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.skills
+~/AppData/Local/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.user_skills
+~/Library/Application Support/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.skills
+~/Library/Application Support/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.user_skills
+~/.config/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.skills
+~/.config/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.user_skills
+```
+
+**QwenWork**（千问办公，Qoder 同源）还会读 `~/.qwenworkcn/bin/computer-use/skills`，
+斜杠命令落在 `~/.qwenworkcn/commands`。
 
 然后给项目指令加一句：
 
 > 每个实质性任务开始前，先评估已安装的 Skill，用 aletheia 选出、读取并真正应用相关 Skill 后再执行。
 
 </details>
+
+## 硬保证：hook 注入
+
+指令文件是「请求」，宿主 hook 是「机制」。把
+`skills/aletheia/scripts/hook_prompt_submit.py` 接到 agent 的 hook 运行时上，
+路由就会在**模型做任何决定之前**机械地执行。默认每次对话触发两次：
+
+- **`SessionStart`** —— 每次对话的第一轮：第一个任务还没被回答，路由协议就已
+  注入上下文，保证「第一轮必触发」。
+- **`UserPromptSubmit`** —— 之后的每条提示：aletheia 对整个技能库做候选检索，
+  把**当前这条提示**的候选清单注入上下文。
+
+WorkBuddy 示例（`~/.workbuddy/settings.json`；新条目需在 `/hooks` 面板确认后生效）：
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "python \"C:/path/to/aletheia/skills/aletheia/scripts/hook_prompt_submit.py\" || true", "timeout": 15 }] }
+    ],
+    "UserPromptSubmit": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "python \"C:/path/to/aletheia/skills/aletheia/scripts/hook_prompt_submit.py\" || true", "timeout": 15 }] }
+    ]
+  }
+}
+```
+
+脚本从 hook 载荷里识别事件，按文档规定的 JSON 信封输出
+（`hookSpecificOutput.additionalContext`）；退出码恒为 0 —— hook 绝不阻塞你的
+消息 —— 并诚实降级：检索失败就明说失败，绝不编造候选。提示词只在进程内使用，
+不回显到上下文或进程列表。
+
+**由主人决定，没有任何写死。** 每一层都可以关掉 hook 或裁剪注入的事件，
+就近声明优先：
+
+| 层级 | 文件 | 示例 |
+| --- | --- | --- |
+| 会话 | `aletheia-session.json` | 单次对话静音：`{"hook": "off"}` |
+| 项目 | `aletheia-config.json` | `{"hook": "on", "hook_events": "session-start"}` |
+| 机器 | `~/.aletheia/config.json` | 本机主人默认值 |
+
+```bash
+python skills/aletheia/scripts/router.py hook                          # 当前状态，以及是哪个文件定的
+python skills/aletheia/scripts/router.py hook --set off                # 立即静音
+python skills/aletheia/scripts/router.py hook --set on                 # 恢复
+python skills/aletheia/scripts/router.py hook --events session-start   # 只保留第一轮注入
+```
+
+`--set off` 是真正的空操作开关：hook 仍接线但不打印任何东西 —— 不用改宿主设置、
+不用重新走审批。要彻底移除注入点，直接删掉宿主 settings 文件里的条目。
+选择偏好（`mode`）与 hook 偏好共用 `aletheia-config.json`，写一个绝不会抹掉另一个。
 
 ## 透明度实战
 
@@ -161,7 +230,7 @@ python tests/zero_dependency_check.py
 | --- | --- |
 | 可见的唯一 skill | **252** |
 | 扫描到的安装位置 | 960 |
-| 已注册 agent 宿主 | 14 |
+| 已注册 agent 宿主 | 17 |
 | 实测到 token 遥测的宿主 | 4 |
 
 开发过程中同一台机器先后报出 186 → 233 → 252 个唯一 skill，**每一次跳升都对应一个真实缺陷**：
@@ -257,7 +326,7 @@ python skills/aletheia/scripts/router.py telemetry    # 各宿主真实用量
 python skills/aletheia/scripts/router.py report --out report.html
 ```
 
-已注册 **14 个主流宿主**。**每个宿主返回相同的字段结构**，读不到的一律标
+已注册 **17 个主流宿主**。**每个宿主返回相同的字段结构**，读不到的一律标
 `unavailable`，**绝不用 0 冒充**。
 
 | 宿主 | 遥测 | Skill 目录 | 宿主 | 遥测 | Skill 目录 |
@@ -269,7 +338,8 @@ python skills/aletheia/scripts/router.py report --out report.html
 | Gemini CLI | 实测 | `.gemini/skills` | Kiro | 实测 | `.kiro/skills` |
 | GitHub Copilot CLI | 实测 | `.copilot/skills` | Crush | 实测 | `.crush/skills` |
 | Aider | 需开启 | `.aider/skills` | WorkBuddy | 未持久化 | `.workbuddy/skills` |
-| OpenCode | JSON 存储 | `.opencode/skills` | Crush | 实测 | `.crush/skills` |
+| pi | 实测 | `.pi/skills` | Doubao Work | 未持久化 | app-data `.skills` |
+| QwenWork | 未持久化 | — | | | |
 
 **每家的字段名都不一样**——Claude 是 `cache_read_input_tokens`，Codex 把
 `cached_tokens` 藏在 `input_token_details`，Kimi 是 `message.payload.token_usage`
@@ -313,7 +383,13 @@ cache read 单独统计而不并入总计——它便宜得多，混在一起成
 ~/.gemini/skills               ~/.factory/skills           ~/.kiro/skills
 ~/.aider/skills                ~/.local/share/crush/skills
 ~/.opencode/skills             ~/.config/opencode/skills
+~/.pi/agent/skills             ~/.qwenworkcn/skills
+~/.qwenworkcn/bin/computer-use/skills
 ```
+
+Doubao Work 的 skill 放在 Electron 应用数据目录里，而不是普通的宿主 skills 目录；
+三个系统的拼写都列在上面的安装小节，注册表只解析当前系统上真实存在的那一个
+（由 `os.name` 决定）。
 
 **Crush 在不同 scope 下读的是两个不同路径**：个人级是 `~/.local/share/crush/skills`，
 项目级是 `.crush/skills`。两个都列在上面和宿主表里——**装错那个，Crush 就完全看不到这个 skill**。
@@ -550,6 +626,11 @@ python skills/aletheia/scripts/router.py inventory --query "pdf" --limit 20
 python skills/aletheia/scripts/router.py mode
 python skills/aletheia/scripts/router.py mode --set manual
 
+# 主人控制的 hook 硬注入：查看、静音、裁剪
+python skills/aletheia/scripts/router.py hook
+python skills/aletheia/scripts/router.py hook --set off
+python skills/aletheia/scripts/router.py hook --events session-start
+
 # 发现约定目录中的技能
 python skills/aletheia/scripts/router.py scan
 
@@ -590,6 +671,7 @@ argparse 仍负责真正的参数解析错误（未知子命令、缺参数）�
 ├── skills/aletheia/
 │   ├── SKILL.md                   # 规范入口
 │   ├── scripts/router.py          # 只读发现、作用域、lint、eval、context、进度
+│   ├── scripts/hook_prompt_submit.py  # 主人可控的 hook 硬注入入口
 │   └── references/                # TRANSPARENCY · PROGRESS · BUTLER · MEASUREMENT · ROUTING_POLICY · SECURITY · CONTEXT · EXAMPLES
 ├── prompts/MASTER_PROMPT.zh-CN.md # 完整常驻提示词（中文）
 ├── prompts/MASTER_PROMPT.en.md    # 完整常驻提示词（英文）
@@ -615,7 +697,10 @@ argparse 仍负责真正的参数解析错误（未知子命令、缺参数）�
 **没有任何普通 SKILL.md 或系统提示词能保证每条请求都正确调用 Skill。**
 Aletheia 能提高命中率与可审计性，但前提是目标 Agent 确实能访问那些 Skill
 和工具。CLI 只是只读候选召回器，不替代宿主的 Skill API、权限或执行器。
-目前还没有经过验证的公开基准 —— 内置 fixtures 是冒烟测试，不是准确率声明。
+hook（见上文）让「注入」本身变成机械动作 —— 不管模型配不配合，路由上下文都会
+进入每次对话 —— 但它仍无法强迫模型「服从」注入的内容；这个差距被如实披露，
+而不是被抹平。目前还没有经过验证的公开基准 —— 内置 fixtures 是冒烟测试，
+不是准确率声明。
 
 ## 常见问题
 

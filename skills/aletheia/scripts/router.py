@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-VERSION = "1.12.0"
+VERSION = "1.13.0"
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 WORD_RE = re.compile(r"[a-z][a-z0-9+-]{1,}|[\u3400-\u9fff]{2,}", re.I)
 # Shared defaults. The CLI and the offline `eval` command must agree, otherwise
@@ -766,6 +766,119 @@ def load_mode_config(path: Path | None) -> dict[str, Any]:
     return config
 
 
+# --- Owner-controlled hook preferences --------------------------------------
+# The hard-injection hooks (hook_prompt_submit.py) are mechanically guaranteed
+# once wired into a host's hook runtime — but the OWNER decides whether they
+# run at all. Nothing is hardwired: every configuration level may switch the
+# hook off or narrow which events inject, and the nearest declaration wins.
+#
+# Levels, highest precedence first:
+#   1. ALETHEIA_HOOK_CONFIG env / --config   (explicit single file)
+#   2. aletheia-session.json near the cwd    (per-session mute: {"hook": "off"})
+#   3. aletheia-config.json near the cwd     (per-project)
+#   4. ~/.aletheia/config.json               (machine-wide owner switch)
+# Defaults: hook on, every known event enabled.
+
+HOOK_EVENTS = ("session-start", "prompt-submit")
+HOOK_CONFIG_ENV = "ALETHEIA_HOOK_CONFIG"
+HOOK_SEARCH_DEPTH = 4
+MACHINE_CONFIG = (".aletheia", "config.json")
+
+
+def parse_hook_events(raw: Any) -> tuple[str, ...] | None:
+    """Accept a list or a comma/space separated string; None when invalid."""
+    if isinstance(raw, str):
+        parts = [p for p in re.split(r"[,\s]+", raw.strip()) if p]
+    elif isinstance(raw, list) and all(isinstance(p, str) for p in raw):
+        parts = list(raw)
+    else:
+        return None
+    picked = tuple(dict.fromkeys(p for p in parts if p in HOOK_EVENTS))
+    return picked if len(picked) == len(parts) else None
+
+
+def _read_json_dict(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def hook_config_files(cwd: Path | None = None, home: Path | None = None) -> list[tuple[str, Path]]:
+    """Candidate configuration files, highest precedence first."""
+    base = (cwd or Path.cwd()).resolve()
+    session: list[tuple[str, Path]] = []
+    project: list[tuple[str, Path]] = []
+    for directory in [base, *list(base.parents)[:HOOK_SEARCH_DEPTH]]:
+        session.append(("session", directory / "aletheia-session.json"))
+        project.append(("project", directory / "aletheia-config.json"))
+    machine = [("machine", (home or Path.home()).joinpath(*MACHINE_CONFIG))]
+    return session + project + machine
+
+
+def hook_settings(cwd: Path | None = None, home: Path | None = None,
+                  config: Path | None = None) -> dict[str, Any]:
+    """Resolve the owner's hook preferences from every configuration level.
+
+    Only keys a level actually declares can override the levels below it, so a
+    project file that only sets `mode` never silently re-enables a hook the
+    owner switched off machine-wide... unless it declares `hook` itself.
+    """
+    explicit = config
+    if explicit is None:
+        env = os.getenv(HOOK_CONFIG_ENV)
+        explicit = Path(env).expanduser() if env else None
+    if explicit is not None:
+        candidates: list[tuple[str, Path]] = [("explicit", Path(explicit).expanduser())]
+    else:
+        candidates = hook_config_files(cwd=cwd, home=home)
+
+    enabled, events = True, HOOK_EVENTS
+    sources = {"enabled": "default", "events": "default"}
+    checked: list[str] = []
+    for kind, path in candidates:
+        if not path.is_file():
+            continue
+        checked.append(str(path))
+        data = _read_json_dict(path)
+        if sources["enabled"] == "default":
+            raw = data.get("hook")
+            if raw in (True, False):
+                enabled, sources["enabled"] = raw, f"{kind}:{path}"
+            elif raw in ("on", "off"):
+                enabled, sources["enabled"] = raw == "on", f"{kind}:{path}"
+        if sources["events"] == "default":
+            parsed = parse_hook_events(data.get("hook_events"))
+            if parsed is not None:
+                events, sources["events"] = parsed, f"{kind}:{path}"
+    return {"enabled": enabled, "events": list(events), "sources": sources,
+            "checked": checked,
+            "note": ("nearest declaration wins; set 'hook': 'off' in any level, "
+                     "or run `router.py hook --set off`, to silence the hard-injection "
+                     "hooks without touching the host's settings file")}
+
+
+def save_hook_settings(path: Path, enabled: bool | None = None,
+                       events: Any = None) -> dict[str, Any]:
+    """Merge hook preferences into a config file, never clobbering other keys.
+
+    `events=None` leaves the stored events untouched; any other value is parsed
+    and rejected when it names an unknown event.
+    """
+    data = _read_json_dict(path)
+    if enabled is not None:
+        data["hook"] = "on" if enabled else "off"
+    if events is not None:
+        parsed = parse_hook_events(events)
+        if parsed is None:
+            raise SkillError(f"unknown hook events {events!r}; known: {', '.join(HOOK_EVENTS)}")
+        data["hook_events"] = list(parsed)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return data
+
+
 # --- Metering ---------------------------------------------------------------
 # Everything here is a COUNT of something observable on disk. There is no token
 # telemetry on most hosts, so this module never invents one. Fields it cannot
@@ -1211,6 +1324,57 @@ def _usage_prefilter(spec: dict[str, Any]) -> tuple[str, ...]:
         extra.extend(names)
     return tuple(dict.fromkeys(USAGE_HINT_KEYS + tuple(extra)))
 
+
+# A few desktop agents follow the OS app-data convention (Electron/Chromium
+# profiles), where the data root differs per platform. For those hosts a
+# `skills` entry may be a dict keyed by "windows"/"darwin"/"linux" instead of
+# a plain `~/` string — one machine must never be told to look in another
+# platform's directories. Every variant is still documented in both READMEs.
+OS_KEYS = ("windows", "darwin", "linux")
+
+
+def current_os_key() -> str:
+    """Registry key for the platform this process runs on."""
+    if os.name == "nt":
+        return "windows"
+    return "darwin" if sys.platform == "darwin" else "linux"
+
+
+def skill_paths(spec: dict[str, Any], os_key: str | None = None) -> tuple[str, ...]:
+    """Skill directories one host reads on one platform.
+
+    Entries are `~/` strings, or windows/darwin/linux dicts for hosts whose
+    data root follows the OS app-data convention. Only the chosen platform's
+    directories come back, so a scan never chases paths that cannot exist here.
+    """
+    wanted = os_key or current_os_key()
+    out: list[str] = []
+    for entry in spec.get("skills", ()):
+        picked = entry if isinstance(entry, str) else entry.get(wanted, ())
+        if isinstance(picked, str):
+            out.append(picked)
+        else:
+            out.extend(picked)
+    return tuple(dict.fromkeys(out))
+
+
+def all_skill_paths(spec: dict[str, Any]) -> tuple[str, ...]:
+    """Every variant of a host's skill dirs, across all platforms.
+
+    Documentation and the guard that keeps it honest need the complete list:
+    a macOS path left undocumented because the author ran Windows is exactly
+    the drift this project keeps getting bitten by.
+    """
+    out: list[str] = []
+    for entry in spec.get("skills", ()):
+        if isinstance(entry, str):
+            out.append(entry)
+        else:
+            for picked in entry.values():
+                out.extend((picked,) if isinstance(picked, str) else picked)
+    return tuple(dict.fromkeys(out))
+
+
 TELEMETRY_HOSTS: dict[str, dict[str, Any]] = {
     "claude": {
         "label": "Claude Code",
@@ -1433,6 +1597,64 @@ TELEMETRY_HOSTS: dict[str, dict[str, Any]] = {
         "aliases": {},
         "skills": ("~/.workbuddy/skills", "~/.workbuddy/plugins/cache"),
         "native_skill_dir": ".workbuddy/skills",
+    },
+    "pi": {
+        "label": "pi",
+        "sessions": "~/.pi/agent/sessions",
+        "globs": ("**/*.jsonl",),
+        "usage_paths": (("message", "usage"),),
+        "aliases": {
+            "input": ("input", "input_tokens"),
+            "output": ("output", "output_tokens"),
+            "cache_read": ("cacheRead", "cache_read_input_tokens"),
+            "cache_write": ("cacheWrite", "cache_creation_input_tokens"),
+        },
+        "skills": ("~/.pi/agent/skills",),
+        "native_skill_dir": ".pi/skills",
+        # Verified against real session files and pi's own loader source: the
+        # usage block is message.usage with camelCase keys, and beside the four
+        # buckets pi logs totalTokens, cost and reasoning. Those are
+        # deliberately not aliased — totalTokens double-counts cache reads and
+        # cost is money, not tokens.
+        "note": "usage lives at message.usage; pi's totalTokens/cost/reasoning "
+                "fields are reported by pi itself and never summed into buckets",
+    },
+    "doubao-work": {
+        "label": "Doubao Work",
+        "sessions": None,  # trajectories carry role/content only, no token counts
+        "globs": (),
+        "usage_paths": (),
+        "aliases": {},
+        # Chromium-profile layout, so the data root is the OS's app-data
+        # directory. The Windows spelling is verified against a real install;
+        # the macOS and Linux spellings follow each OS's Electron convention
+        # and are registered as candidates, not measurements. Both skill
+        # directories exist in the workspace: .skills holds the app's shipped
+        # library, .user_skills the person's own additions.
+        "skills": ({
+            "windows": "~/AppData/Local/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.skills",
+            "darwin": "~/Library/Application Support/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.skills",
+            "linux": "~/.config/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.skills",
+        }, {
+            "windows": "~/AppData/Local/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.user_skills",
+            "darwin": "~/Library/Application Support/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.user_skills",
+            "linux": "~/.config/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.user_skills",
+        }),
+        "native_skill_dir": "",
+        "note": "skills and sessions live under the app's machine-global "
+                "agent_mode workspace; no project-level skill directory is known",
+    },
+    "qwenwork": {
+        "label": "QwenWork",
+        "sessions": None,  # task state lives inside the app; no token counts on disk
+        "globs": (),
+        "usage_paths": (),
+        "aliases": {},
+        "skills": ("~/.qwenworkcn/skills", "~/.qwenworkcn/bin/computer-use/skills"),
+        "native_skill_dir": "",
+        "note": "skills and slash commands live under the machine-global "
+                "~/.qwenworkcn (commands land in ~/.qwenworkcn/commands); "
+                "no project-level skill directory is known",
     },
 }
 
@@ -1700,13 +1922,17 @@ def collect_host_usage(
 
 
 def host_skill_roots(hosts: tuple[str, ...] | None = None) -> list[Path]:
-    """Skill directories belonging to each supported host, deduplicated."""
+    """Skill directories belonging to each supported host, deduplicated.
+
+    Resolved per platform: a Windows machine must not be sent to
+    ~/Library/Application Support, nor a Mac to ~/AppData/Local.
+    """
     roots: list[Path] = []
     for host in hosts or tuple(TELEMETRY_HOSTS):
         spec = TELEMETRY_HOSTS.get(host)
         if not spec:
             continue
-        for raw in spec.get("skills", ()):
+        for raw in skill_paths(spec):
             roots.append((Path.home() / str(raw).lstrip("~/")).expanduser())
     return list(dict.fromkeys(roots))
 
@@ -2801,7 +3027,7 @@ def find_installations(name: str = "aletheia") -> dict[str, list[str]]:
     found: dict[str, list[str]] = {}
     claimed: set[str] = set()
     for host, spec in TELEMETRY_HOSTS.items():
-        for raw in spec.get("skills", ()):
+        for raw in skill_paths(spec):
             # resolve() because these paths are returned as data, and the caller
             # may compare them. See load_session_manifest for why a reported path
             # has to be canonical: on macOS /var is a symlink to /private/var,
@@ -3146,6 +3372,15 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--set", dest="new_mode", choices=("auto", "manual"), default=None, help="switch and persist")
     mode.add_argument("--only", action="append", default=[], help="with --set manual: initial allowlist of skill names")
 
+    hook = sub.add_parser("hook", help="show or set the owner's hard-injection hook preferences")
+    hook.add_argument("--config", type=Path, default=None,
+                      help="config file to read or write (default: full resolution chain for show; "
+                           "~/.aletheia/config.json for --set)")
+    hook.add_argument("--set", dest="new_state", choices=("on", "off"), default=None,
+                      help="enable or silence the hard-injection hooks instantly")
+    hook.add_argument("--events", default=None,
+                      help="comma list of events that may inject: session-start,prompt-submit")
+
     meas = sub.add_parser("measure", help="record what a routing step actually costs (local ledger, no network)")
     meas.add_argument("task", help="the task text about to be routed")
     meas.add_argument("--root", action="append", default=[])
@@ -3379,12 +3614,35 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(load_mode_config(config_path), ensure_ascii=False, indent=2))
             return 0
         only = parse_scope(args.only)
-        saved = {"mode": args.new_mode}
+        # Merge into the existing file: hook preferences and mode share
+        # aletheia-config.json, and a mode switch must not erase them.
+        saved = _read_json_dict(config_path)
+        saved["mode"] = args.new_mode
         if only:
             saved["only"] = sorted(only)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(saved, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        print(json.dumps({"saved": str(config_path), **saved}, ensure_ascii=False, indent=2))
+        print(json.dumps({"saved": str(config_path), "mode": args.new_mode,
+                          **({"only": saved["only"]} if only else {})}, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.command == "hook":
+        config_path = args.config.expanduser() if args.config else None
+        if args.new_state is None and args.events is None:
+            settings = hook_settings(config=config_path)
+            print(json.dumps(settings, ensure_ascii=False, indent=2))
+            return 0
+        target = config_path or (Path.home().joinpath(*MACHINE_CONFIG))
+        try:
+            saved = save_hook_settings(
+                target,
+                enabled=(args.new_state == "on") if args.new_state else None,
+                events=args.events,
+            )
+        except SkillError as e:
+            return fail(str(e))
+        print(json.dumps({"saved": str(target), **{k: saved[k] for k in ("hook", "hook_events") if k in saved}},
+                         ensure_ascii=False, indent=2))
         return 0
 
     if args.command == "progress":

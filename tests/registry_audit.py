@@ -34,7 +34,9 @@ def count_dirs(path: pathlib.Path) -> int:
 
 live, absent = [], []
 for key, host in sorted(router.TELEMETRY_HOSTS.items(), key=lambda kv: kv[1]["label"]):
-    for raw in host.get("skills", ()):
+    # skill_paths() resolves dict-declared app-data hosts to this platform's
+    # spelling, so the report only names directories that can exist here.
+    for raw in router.skill_paths(host):
         path = home / raw.lstrip("~/")
         if path.is_dir() and count_dirs(path):
             live.append((host["label"], raw, count_dirs(path)))

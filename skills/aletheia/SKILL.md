@@ -12,7 +12,7 @@ description: >-
 license: MIT
 compatibility: Requires filesystem access for the optional Python 3.10+ discovery helper; skill selection works manually with a host-provided skills list when filesystem or Python is unavailable.
 metadata:
-  version: "1.12.0"
+  version: "1.13.0"
   category: meta-routing
 ---
 
@@ -80,6 +80,22 @@ Accept `3`, `2 5`, `2,5`, `all`, and `none` (meaning: no skill — just do the
 task directly). Numbers are **per-invocation**; if the library changes, list
 again rather than reusing stale numbers. With hundreds of skills installed,
 always `--query` first instead of dumping the whole registry.
+
+## Hard guarantee: the hook
+
+An instruction file is a request; a host hook is a mechanism. Where the host
+exposes a hook runtime, wire `scripts/hook_prompt_submit.py` into it and the
+routing context is injected **mechanically** — `SessionStart` covers the first
+turn of every conversation, `UserPromptSubmit` covers every prompt after that.
+
+The owner stays in control; nothing is hardwired. `python scripts/router.py
+hook` shows what is active and which file decided it, `--set off` silences the
+injection instantly (a true no-op, no host settings edit), and `--events`
+narrows which events inject. Preferences resolve nearest-first across
+`aletheia-session.json` (per session), `aletheia-config.json` (per project) and
+`~/.aletheia/config.json` (machine-wide). The hook always exits 0 and never
+blocks a message. It guarantees the **injection**, not the model's obedience —
+that gap is disclosed, not papered over.
 
 ## Mandatory preflight (every incoming task)
 

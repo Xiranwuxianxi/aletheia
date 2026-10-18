@@ -58,7 +58,7 @@ Plus the two that make long sessions painful: **drifting context** and
 git clone https://github.com/Xiranwuxianxi/aletheia.git
 cd aletheia
 
-python scripts/install.py --list          # the 14 hosts and where each reads instructions
+python scripts/install.py --list          # the 17 hosts and where each reads instructions
 python scripts/install.py --scope user --bootstrap --dry-run
 python scripts/install.py --scope user --bootstrap
 ```
@@ -84,7 +84,7 @@ python scripts/install.py --scope user --bootstrap --mode manual
 ```
 
 **Every host in the registry is installable.** The previous installer knew two
-while the registry tracked fourteen, so the hosts actually in use had no path at
+while the registry tracked seventeen, so the hosts actually in use had no path at
 all.
 
 Three hosts get the skill directory but no routing hook, because no instruction
@@ -127,12 +127,89 @@ Copy `skills/aletheia/` into wherever your agent looks for skills:
 | Qwen Code | — | `~/.qwen/skills/aletheia/` |
 | Gemini CLI | — | `~/.gemini/skills/aletheia/` |
 | GitHub Copilot CLI | — | `~/.copilot/skills/aletheia/` |
+| pi | `.pi/skills/aletheia/` | `~/.pi/agent/skills/aletheia/` |
+| Doubao Work | — | see the per-OS paths below |
+| QwenWork | — | `~/.qwenworkcn/skills/aletheia/` |
+
+**Doubao Work** follows the Electron app-data layout, so its skill directory is
+spelled per OS (the Windows spelling is verified against a real install; macOS
+and Linux follow each OS's convention and are registered as candidates):
+
+```text
+~/AppData/Local/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.skills
+~/AppData/Local/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.user_skills
+~/Library/Application Support/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.skills
+~/Library/Application Support/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.user_skills
+~/.config/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.skills
+~/.config/DoubaoWork/User Data/Default/.doubaowork/agent_mode/workspace/.user_skills
+```
+
+**QwenWork** (Qoder's house spelling) also reads
+`~/.qwenworkcn/bin/computer-use/skills`, and its slash commands land in
+`~/.qwenworkcn/commands`.
 
 Then add one line to your project instructions:
 
 > Before each substantive task, assess installed skills and use aletheia to select, read and actually apply relevant skills before execution.
 
 </details>
+
+## Hard guarantee: the hook
+
+An instruction file is a *request*; a host hook is a *mechanism*. Wire
+`skills/aletheia/scripts/hook_prompt_submit.py` into your agent's hook runtime
+and the routing runs **before the model can decide anything**. By default it
+fires twice per conversation:
+
+- **`SessionStart`** — the first turn of every conversation: the routing
+  protocol is injected before the first task is answered, so the first turn is
+  covered even if nothing else runs.
+- **`UserPromptSubmit`** — every prompt after that: aletheia runs retrieval over
+  the installed library and injects the advisory candidates **for this prompt**.
+
+WorkBuddy example (`~/.workbuddy/settings.json`; new entries need approval in
+the `/hooks` panel before they take effect):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "python \"C:/path/to/aletheia/skills/aletheia/scripts/hook_prompt_submit.py\" || true", "timeout": 15 }] }
+    ],
+    "UserPromptSubmit": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "python \"C:/path/to/aletheia/skills/aletheia/scripts/hook_prompt_submit.py\" || true", "timeout": 15 }] }
+    ]
+  }
+}
+```
+
+The script reads the event from the hook payload and answers with the documented
+JSON envelope (`hookSpecificOutput.additionalContext`). It always exits 0 — a
+hook must never block your message — and degrades honestly: if retrieval fails,
+the output says so instead of inventing candidates. Prompt text is used
+in-process and never echoed into the context or the process list.
+
+**The owner decides — nothing is hardwired.** Every level may switch the hook
+off or narrow which events inject, and the nearest declaration wins:
+
+| Level | File | Example |
+| --- | --- | --- |
+| session | `aletheia-session.json` | mute one conversation: `{"hook": "off"}` |
+| project | `aletheia-config.json` | `{"hook": "on", "hook_events": "session-start"}` |
+| machine | `~/.aletheia/config.json` | the owner's default for this machine |
+
+```bash
+python skills/aletheia/scripts/router.py hook                          # what is active, and which file said so
+python skills/aletheia/scripts/router.py hook --set off                # silence instantly
+python skills/aletheia/scripts/router.py hook --set on                 # bring it back
+python skills/aletheia/scripts/router.py hook --events session-start   # only the first turn injects
+```
+
+`--set off` is a true no-op switch: the hook stays wired but prints nothing —
+no host settings edit, no re-approval round-trip. To remove the injection point
+entirely, delete the entry from the host's settings file. The mode preference
+(`mode`) and hook preferences share `aletheia-config.json`; writing one never
+clobbers the other.
 
 ## Works on Windows, macOS and Linux
 
@@ -180,7 +257,7 @@ silently the first time someone reaches for a convenient import.
 | --- | --- |
 | Unique skills visible | **252** |
 | Install locations scanned | 960 |
-| Agent hosts registered | 14 |
+| Agent hosts registered | 17 |
 | Hosts with measured token telemetry | 4 |
 
 Earlier in development the same machine reported 186 unique skills, then 233, then
@@ -315,7 +392,7 @@ python skills/aletheia/scripts/router.py telemetry    # real totals
 python skills/aletheia/scripts/router.py report --out report.html
 ```
 
-Fourteen mainstream hosts are registered. **Every host returns the same keys**,
+Seventeen mainstream hosts are registered. **Every host returns the same keys**,
 and one we cannot read is reported `unavailable` — never `0`.
 
 | Host | Telemetry | Skill dir (project) | Host | Telemetry | Skill dir (project) |
@@ -327,7 +404,8 @@ and one we cannot read is reported `unavailable` — never `0`.
 | Gemini CLI | measured | `.gemini/skills` | Kiro | measured | `.kiro/skills` |
 | GitHub Copilot CLI | measured | `.copilot/skills` | Crush | measured | `.crush/skills` |
 | Aider | if enabled | `.aider/skills` | WorkBuddy | none persisted | `.workbuddy/skills` |
-| OpenCode | JSON store | `.opencode/skills` | Crush | measured | `.crush/skills` |
+| pi | measured | `.pi/skills` | Doubao Work | none persisted | app-data `.skills` |
+| QwenWork | none persisted | — | | | |
 
 Each host names its fields differently — Claude logs `cache_read_input_tokens`,
 Codex hides `cached_tokens` inside `input_token_details`, Kimi uses
@@ -382,7 +460,14 @@ stays reachable:
 ~/.gemini/skills               ~/.factory/skills           ~/.kiro/skills
 ~/.aider/skills                ~/.local/share/crush/skills
 ~/.opencode/skills             ~/.config/opencode/skills
+~/.pi/agent/skills             ~/.qwenworkcn/skills
+~/.qwenworkcn/bin/computer-use/skills
 ```
+
+Doubao Work keeps its skills in the Electron app-data tree instead of a plain
+per-host skills directory; all three OS spellings are listed in the install
+section above and the registry resolves only the one that can exist on the
+machine it runs on (`os.name` decides).
 
 Crush reads two different paths depending on scope: `~/.local/share/crush/skills`
 at user level, `.crush/skills` inside a project. Both are listed above and in the
@@ -639,6 +724,11 @@ python skills/aletheia/scripts/router.py inventory --query "pdf" --limit 20
 python skills/aletheia/scripts/router.py mode
 python skills/aletheia/scripts/router.py mode --set manual
 
+# Owner-controlled hard-injection hooks: show, silence, narrow
+python skills/aletheia/scripts/router.py hook
+python skills/aletheia/scripts/router.py hook --set off
+python skills/aletheia/scripts/router.py hook --events session-start
+
 # Discover skills in conventional locations
 python skills/aletheia/scripts/router.py scan
 
@@ -681,6 +771,7 @@ candidate's `SKILL.md` before deciding.
 ├── skills/aletheia/
 │   ├── SKILL.md                   # spec-compliant entry point
 │   ├── scripts/router.py          # read-only discovery, scope, lint, eval, context, progress
+│   ├── scripts/hook_prompt_submit.py  # owner-controlled hard-injection hook entry point
 │   └── references/                # TRANSPARENCY · PROGRESS · BUTLER · MEASUREMENT · ROUTING_POLICY · SECURITY · CONTEXT · EXAMPLES
 ├── prompts/MASTER_PROMPT.en.md    # full resident prompt (English)
 ├── prompts/MASTER_PROMPT.zh-CN.md # full resident prompt (Chinese)
@@ -707,8 +798,11 @@ candidate's `SKILL.md` before deciding.
 on every request.** Aletheia improves hit rate and auditability, and only if the
 target agent can actually reach those skills and tools. The CLI is a read-only
 candidate retriever — it does not replace the host's skill API, permissions or
-executor. There is no verified public benchmark for this yet; the bundled
-fixtures are a smoke test, not an accuracy claim.
+executor. The hook (above) makes the *injection* mechanical — the routing
+context is added to every conversation whether the model cooperates or not —
+but it still cannot force the model to *obey* what was injected; that gap is
+disclosed, not papered over. There is no verified public benchmark for this
+yet; the bundled fixtures are a smoke test, not an accuracy claim.
 
 ## FAQ
 

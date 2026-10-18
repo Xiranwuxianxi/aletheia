@@ -54,6 +54,12 @@ class RouterTests(unittest.TestCase):
                 (root / "bad/SKILL.md").symlink_to(self.fixtures / "pdf-processing/SKILL.md")
             except (OSError, NotImplementedError) as e:
                 self.skipTest(f"symlinks unavailable on this platform: {e}")
+            if not (root / "bad/SKILL.md").is_symlink():
+                # Some sandboxes swallow symlink creation silently: the call
+                # returns, raises nothing, and nothing exists on disk. That is
+                # the same as a platform that cannot symlink at all — skip
+                # rather than fail on a guard that has nothing to guard.
+                self.skipTest("symlink creation silently dropped by this environment")
             skills, issues = router.discover([root])
             self.assertFalse(skills)
             self.assertTrue(issues)
@@ -581,11 +587,21 @@ class RouterTests(unittest.TestCase):
     def test_registry_covers_the_mainstream_agents(self):
         """The registry must know the widely used hosts, not just two."""
         for expected in ("claude", "codex", "gemini", "qwen", "copilot", "kimi",
-                         "opencode", "droid", "kiro", "crush", "aider", "workbuddy"):
+                         "opencode", "droid", "kiro", "crush", "aider", "workbuddy",
+                         "pi", "hermes", "openclaw", "doubao-work", "qwenwork"):
             self.assertIn(expected, router.TELEMETRY_HOSTS)
         for host, spec in router.TELEMETRY_HOSTS.items():
             self.assertIn("skills", spec, f"{host} must declare its skill directories")
-            self.assertTrue(spec.get("native_skill_dir"), f"{host} must name its skill dir")
+            if not spec.get("native_skill_dir"):
+                # A machine-global desktop agent may have no project-level
+                # skill directory at all — but only if it says so in words. A
+                # bare empty field is how a host silently ends up with nothing
+                # installed and nobody told.
+                self.assertTrue(
+                    spec.get("note"),
+                    f"{host} must name its project skill dir, or its note must "
+                    "explain why none exists",
+                )
             if spec.get("sessions"):
                 self.assertTrue(spec.get("aliases"), f"{host} needs field aliases")
 
@@ -602,6 +618,113 @@ class RouterTests(unittest.TestCase):
             for path_tuple in spec.get("usage_paths", ()):
                 for segment in path_tuple:
                     self.assertIn(segment, hints, f"{host} usage path segment {segment!r} must be a hint")
+
+    def test_pi_camelcase_usage_is_understood(self):
+        """pi logs usage at message.usage with camelCase keys.
+
+        Verified against real session files: input/output/cacheRead/cacheWrite
+        sit beside totalTokens, cost and reasoning, which must NOT be summed
+        into the buckets — totalTokens double-counts the same tokens and cost
+        is money. A line whose format drifts must land as unavailable, never
+        as invented zeroes, but a matching line must produce exact numbers.
+        """
+        usage = {"input": 30101, "output": 38, "cacheRead": 1152, "cacheWrite": 0,
+                 "reasoning": 27, "totalTokens": 31291, "cost": {"total": 0.12}}
+        record = {"id": "m1", "type": "message", "parentId": None,
+                  "timestamp": 1760000000000, "message": {"usage": usage}}
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp) / ".pi" / "agent" / "sessions" / "proj" / "s.jsonl"
+            session.parent.mkdir(parents=True)
+            session.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            result = router.collect_host_usage(base=Path(tmp), hosts=("pi",))["pi"]
+        self.assertTrue(result["available"])
+        self.assertEqual(1, result["messages_with_usage"])
+        self.assertEqual(30101, result["input_tokens"])
+        self.assertEqual(38, result["output_tokens"])
+        self.assertEqual(1152, result["cache_read_tokens"])
+        self.assertEqual(0, result["cache_write_tokens"])
+        self.assertEqual(30139, result["billable_tokens_excluding_cache_read"])
+
+    def test_skills_only_hosts_say_unavailable_never_zero(self):
+        """豆包工作/千问办公 persist no token counts on disk.
+
+        Their sessions are role/content trajectories or in-app task state.
+        Reporting 0 for them would read as measured nothing-usage; the contract
+        is unavailable with a stated reason.
+        """
+        for host in ("doubao-work", "qwenwork", "workbuddy"):
+            with tempfile.TemporaryDirectory() as tmp:
+                result = router.collect_host_usage(base=Path(tmp), hosts=(host,))[host]
+            self.assertFalse(result["available"], host)
+            self.assertEqual(router.UNAVAILABLE, result["input_tokens"], host)
+            self.assertEqual(router.UNAVAILABLE,
+                             result["total_tokens_including_cache_read"], host)
+            self.assertIn("does not persist token usage", result["reason"], host)
+
+    def test_per_os_skill_directories_resolve_per_platform(self):
+        """An app-data host must never hand one OS another's directories.
+
+        Doubao Work follows the Electron profile layout, so its root is
+        ~/AppData/Local on Windows, ~/Library/Application Support on macOS and
+        ~/.config on Linux. Windows is verified against a real install; the
+        other two follow each OS's convention and are candidates. Every
+        spelling must still be documented — that half is guarded against the
+        READMEs directly.
+        """
+        spec = router.TELEMETRY_HOSTS["doubao-work"]
+        resolved = {}
+        for os_key in router.OS_KEYS:
+            paths = router.skill_paths(spec, os_key)
+            resolved[os_key] = paths
+            self.assertTrue(paths, f"{os_key} must resolve at least one directory")
+            for raw in paths:
+                self.assertTrue(raw.startswith("~/"), f"{os_key}: {raw}")
+        self.assertTrue(any("AppData/Local" in p for p in resolved["windows"]))
+        self.assertTrue(any("Library/Application Support" in p
+                            for p in resolved["darwin"]))
+        self.assertTrue(any(p.startswith("~/.config/") for p in resolved["linux"]))
+        # No platform's spellings may leak into another's list.
+        self.assertFalse(any("AppData" in p
+                             for p in resolved["darwin"] + resolved["linux"]))
+        self.assertFalse(any("Library/Application Support" in p
+                             for p in resolved["windows"] + resolved["linux"]))
+        # The all-variants view is exactly the union — the README guard only
+        # works if documentation chases the same list.
+        self.assertEqual(
+            sorted({p for paths in resolved.values() for p in paths}),
+            sorted(set(router.all_skill_paths(spec))),
+        )
+        # A host with plain `~/` strings resolves the same on every platform.
+        qwen = router.skill_paths(router.TELEMETRY_HOSTS["qwenwork"])
+        for os_key in router.OS_KEYS:
+            self.assertEqual(qwen, router.skill_paths(
+                router.TELEMETRY_HOSTS["qwenwork"], os_key))
+
+    def test_registry_skill_declarations_are_well_formed(self):
+        """Dict entries must use real OS keys; strings must be home-based.
+
+        A typo'd key ("widnows") would silently resolve to nothing and hide a
+        host's whole library on one platform, so the shape is checked for
+        every entry rather than trusted on the one host that motivated it.
+        """
+        for host, spec in router.TELEMETRY_HOSTS.items():
+            for entry in spec.get("skills", ()):
+                if isinstance(entry, str):
+                    variants = (entry,)
+                else:
+                    self.assertTrue(entry, f"{host}: empty OS dict")
+                    self.assertTrue(
+                        set(entry) <= set(router.OS_KEYS),
+                        f"{host}: unknown OS key in {sorted(entry)}",
+                    )
+                    variants = tuple(
+                        v if isinstance(v, str) else v[0] for v in entry.values()
+                    )
+                for raw in variants:
+                    self.assertTrue(
+                        raw.startswith("~/"),
+                        f"{host}: {raw!r} must be declared home-relative",
+                    )
 
     def test_audit_finds_and_counts_damage(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -786,7 +909,9 @@ class RouterTests(unittest.TestCase):
             text = (ROOT / readme).read_text(encoding="utf-8")
             personal = set()
             for host in router.TELEMETRY_HOSTS.values():
-                personal |= {s for s in host.get("skills", ()) if s.startswith("~/")}
+                # all_skill_paths: a dict-declared per-OS host must document
+                # every platform's spelling, not just the author's.
+                personal |= {s for s in router.all_skill_paths(host) if s.startswith("~/")}
             for directory in sorted(personal):
                 self.assertIn(
                     directory, text,
