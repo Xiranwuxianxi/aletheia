@@ -115,6 +115,14 @@ class RouterTests(unittest.TestCase):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         self.assertIn(declared.group(1), changelog, "CHANGELOG.md must mention the current version")
 
+        badge = re.compile(r"badge/version-([^-/]+)-")
+        for readme in ("README.md", "README.zh-CN.md"):
+            text = (ROOT / readme).read_text(encoding="utf-8")
+            match = badge.search(text)
+            self.assertIsNotNone(match, f"{readme} must carry a version badge")
+            self.assertEqual(declared.group(1), match.group(1),
+                             f"{readme} badge version drifted from pyproject")
+
     def test_session_scope_restricts_candidates(self):
         """--only must suppress non-allowlisted skills and report what was withheld."""
         skills, _ = router.discover([self.fixtures])
