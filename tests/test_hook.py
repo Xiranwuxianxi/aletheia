@@ -150,7 +150,11 @@ class HookScriptTests(unittest.TestCase):
             proc = subprocess.run(
                 [sys.executable, str(HOOK), *argv],
                 input=json.dumps(payload) if payload is not None else "",
-                capture_output=True, text=True, env=env, timeout=120,
+                # The hook pins its own stdout to UTF-8; decode it as such.
+                # The default locale codec (GBK on a Chinese Windows) would
+                # die on the first CJK byte and hand back stdout=None.
+                capture_output=True, text=True, encoding="utf-8",
+                env=env, timeout=120,
             )
             self.assertEqual(0, proc.returncode, proc.stderr)
             return proc.stdout
